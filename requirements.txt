@@ -1,0 +1,5 @@
+scapy
+customtkinter
+psutil
+pyinstaller
+pillow
