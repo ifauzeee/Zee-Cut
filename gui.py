@@ -6,6 +6,7 @@ Advanced WiFi Network Device Controller.
 import customtkinter as ctk
 from tkinter import messagebox
 import threading
+import time
 import sys
 import os
 import webbrowser
@@ -103,27 +104,18 @@ class WiFiThrottlerApp(ctk.CTk):
         }
         self.theme_var = ctk.StringVar(value="AMOLED Black")
         self.filter_mode_var = ctk.StringVar(value="All Devices")
-        self.selected_device_ips: set[str] = set()
         self.device_lag_percents: dict[str, int] = {}
+        self.pending_lag_apply_jobs: dict[str, str] = {}
+        self.lag_apply_delay_ms = 280
+        self.last_lag_interaction_ts = 0.0
+        self.scan_in_progress = False
         self.list_column_minsize = {
-            0: 64,   # Sel
-            1: 280,  # Device
-            2: 170,  # IP
-            3: 240,  # MAC
-            4: 120,  # Type
-            5: 220,  # Lag %
-            6: 140,  # Status
-            7: 132,  # Action
-        }
-        self.list_label_widths = {
-            0: 28,
-            1: 250,
-            2: 140,
-            3: 210,
-            4: 90,
-            5: 190,
-            6: 110,
-            7: 100,
+            0: 320,  # Device
+            1: 180,  # IP
+            2: 250,  # MAC
+            3: 120,  # Type
+            4: 240,  # Lag %
+            5: 160,  # Status
         }
         self._is_admin = False
         self._apply_theme(self.theme_options[self.theme_var.get()])
@@ -319,6 +311,20 @@ class WiFiThrottlerApp(ctk.CTk):
         )
         self.theme_dropdown.pack(side="left", padx=(0, 10))
 
+        self.flush_arp_btn = ctk.CTkButton(
+            right_toolbar,
+            text="Flush ARP (Admin)",
+            font=FONTS["small"],
+            fg_color=COLORS["bg_input"],
+            hover_color=COLORS["bg_card_hover"],
+            text_color=COLORS["text_primary"],
+            corner_radius=8,
+            width=140,
+            height=38,
+            command=self._flush_arp_admin
+        )
+        self.flush_arp_btn.pack(side="left", padx=(0, 8))
+
         # Scan button
         self.scan_btn = ctk.CTkButton(
             right_toolbar,
@@ -331,21 +337,7 @@ class WiFiThrottlerApp(ctk.CTk):
             height=38,
             command=self._scan_network
         )
-        self.scan_btn.pack(side="left", padx=(0, 8))
-
-        # Restore All button
-        self.restore_all_btn = ctk.CTkButton(
-            right_toolbar,
-            text="Restore All",
-            font=FONTS["body_bold"],
-            fg_color=COLORS["accent_success"],
-            hover_color=COLORS["accent_success_hover"],
-            corner_radius=8,
-            width=120,
-            height=38,
-            command=self._restore_all
-        )
-        self.restore_all_btn.pack(side="left")
+        self.scan_btn.pack(side="left")
 
     # ─── Device List ────────────────────────────────────────────────────
 
@@ -354,7 +346,6 @@ class WiFiThrottlerApp(ctk.CTk):
         container.grid(row=2, column=0, sticky="nsew", padx=16, pady=16)
         container.grid_rowconfigure(1, weight=1)
         container.grid_columnconfigure(0, weight=1)
-        container.grid_columnconfigure(1, weight=0)
 
         # Device count header
         self.device_header = ctk.CTkLabel(
@@ -366,68 +357,6 @@ class WiFiThrottlerApp(ctk.CTk):
         )
         self.device_header.grid(row=0, column=0, sticky="w", pady=(0, 12))
 
-        self.batch_controls_frame = ctk.CTkFrame(
-            container,
-            fg_color=COLORS["bg_card"],
-            corner_radius=8,
-            border_width=1,
-            border_color=COLORS["border"]
-        )
-        self.batch_controls_frame.grid(row=0, column=1, sticky="e", pady=(0, 12))
-
-        self.check_all_btn = ctk.CTkButton(
-            self.batch_controls_frame,
-            text="Check All",
-            font=FONTS["small"],
-            fg_color=COLORS["bg_input"],
-            hover_color=COLORS["bg_card_hover"],
-            corner_radius=8,
-            width=90,
-            height=30,
-            command=self._toggle_select_all
-        )
-        self.check_all_btn.pack(side="left", padx=(8, 6), pady=6)
-
-        self.clear_selection_btn = ctk.CTkButton(
-            self.batch_controls_frame,
-            text="Clear",
-            font=FONTS["small"],
-            fg_color=COLORS["bg_input"],
-            hover_color=COLORS["bg_card_hover"],
-            corner_radius=8,
-            width=70,
-            height=30,
-            command=self._clear_selection
-        )
-        self.clear_selection_btn.pack(side="left", padx=(0, 6), pady=6)
-
-        self.lag_selected_btn = ctk.CTkButton(
-            self.batch_controls_frame,
-            text="Lag Selected (0)",
-            font=FONTS["small"],
-            fg_color=COLORS["accent_danger"],
-            hover_color=COLORS["accent_danger_hover"],
-            corner_radius=8,
-            width=130,
-            height=30,
-            command=self._lag_selected
-        )
-        self.lag_selected_btn.pack(side="left", padx=(0, 6), pady=6)
-
-        self.restore_selected_btn = ctk.CTkButton(
-            self.batch_controls_frame,
-            text="Restore Selected (0)",
-            font=FONTS["small"],
-            fg_color=COLORS["accent_success"],
-            hover_color=COLORS["accent_success_hover"],
-            corner_radius=8,
-            width=150,
-            height=30,
-            command=self._restore_selected
-        )
-        self.restore_selected_btn.pack(side="left", padx=(0, 8), pady=6)
-        self._refresh_batch_controls()
-
         # Scrollable device list
         self.device_scroll = ctk.CTkScrollableFrame(
             container,
@@ -436,7 +365,7 @@ class WiFiThrottlerApp(ctk.CTk):
             scrollbar_button_color=COLORS["border_light"],
             scrollbar_button_hover_color=COLORS["accent_primary"]
         )
-        self.device_scroll.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        self.device_scroll.grid(row=1, column=0, sticky="nsew")
         self.device_scroll.grid_columnconfigure(0, weight=1)
 
         # Empty state
@@ -496,9 +425,10 @@ class WiFiThrottlerApp(ctk.CTk):
     def _check_admin(self):
         self._is_admin = self.engine.is_admin()
         self._apply_admin_badge_style()
+        if hasattr(self, "flush_arp_btn"):
+            self.flush_arp_btn.configure(state="normal" if self._is_admin else "disabled")
         if self._is_admin:
             self._load_interfaces()
-            self.engine.enable_ip_forwarding()
         else:
             self._show_admin_warning()
             self._load_interfaces()
@@ -579,11 +509,6 @@ class WiFiThrottlerApp(ctk.CTk):
             self.toolbar_frame.configure(fg_color=COLORS["bg_card"])
         if hasattr(self, "statusbar_frame"):
             self.statusbar_frame.configure(fg_color=COLORS["bg_card"])
-        if hasattr(self, "batch_controls_frame"):
-            self.batch_controls_frame.configure(
-                fg_color=COLORS["bg_card"],
-                border_color=COLORS["border"]
-            )
 
         if hasattr(self, "title_label"):
             self.title_label.configure(text_color=COLORS["text_primary"])
@@ -620,32 +545,11 @@ class WiFiThrottlerApp(ctk.CTk):
                 fg_color=COLORS["accent_primary"],
                 hover_color=COLORS["accent_primary_hover"]
             )
-        if hasattr(self, "restore_all_btn"):
-            self.restore_all_btn.configure(
-                fg_color=COLORS["accent_success"],
-                hover_color=COLORS["accent_success_hover"]
-            )
-        if hasattr(self, "check_all_btn"):
-            self.check_all_btn.configure(
+        if hasattr(self, "flush_arp_btn"):
+            self.flush_arp_btn.configure(
                 fg_color=COLORS["bg_input"],
                 hover_color=COLORS["bg_card_hover"],
                 text_color=COLORS["text_primary"]
-            )
-        if hasattr(self, "clear_selection_btn"):
-            self.clear_selection_btn.configure(
-                fg_color=COLORS["bg_input"],
-                hover_color=COLORS["bg_card_hover"],
-                text_color=COLORS["text_primary"]
-            )
-        if hasattr(self, "lag_selected_btn"):
-            self.lag_selected_btn.configure(
-                fg_color=COLORS["accent_danger"],
-                hover_color=COLORS["accent_danger_hover"]
-            )
-        if hasattr(self, "restore_selected_btn"):
-            self.restore_selected_btn.configure(
-                fg_color=COLORS["accent_success"],
-                hover_color=COLORS["accent_success_hover"]
             )
 
         if hasattr(self, "device_header"):
@@ -673,164 +577,110 @@ class WiFiThrottlerApp(ctk.CTk):
         return 100 - lag_percent
 
     def _get_lag_percent(self, ip: str) -> int:
-        return max(0, min(100, int(self.device_lag_percents.get(ip, 100))))
+        if ip in self.device_lag_percents:
+            return max(0, min(100, int(self.device_lag_percents[ip])))
+        device = self.engine.devices.get(ip)
+        if device and device.is_throttled:
+            return 100
+        return 0
 
     def _set_lag_percent(self, ip: str, lag_percent: int):
         self.device_lag_percents[ip] = max(0, min(100, int(lag_percent)))
 
-    def _set_device_selected(self, ip: str, selected: bool):
-        if selected:
-            self.selected_device_ips.add(ip)
-        else:
-            self.selected_device_ips.discard(ip)
-        self._refresh_batch_controls()
-
     def _sync_device_control_state(self, devices: list[NetworkDevice]):
         target_ips = {d.ip for d in devices if self._is_target_device(d)}
-        self.selected_device_ips = {ip for ip in self.selected_device_ips if ip in target_ips}
         self.device_lag_percents = {
             ip: percent for ip, percent in self.device_lag_percents.items()
             if ip in target_ips
         }
+        for ip, after_id in list(self.pending_lag_apply_jobs.items()):
+            if ip not in target_ips:
+                self.after_cancel(after_id)
+                self.pending_lag_apply_jobs.pop(ip, None)
         for ip in target_ips:
-            self.device_lag_percents.setdefault(ip, 100)
-        self._refresh_batch_controls()
+            self.device_lag_percents.setdefault(ip, 100 if self.engine.devices[ip].is_throttled else 0)
 
-    def _refresh_batch_controls(self):
-        if not hasattr(self, "lag_selected_btn"):
-            return
-        selected_count = len(self.selected_device_ips)
-        self.lag_selected_btn.configure(text=f"Lag Selected ({selected_count})")
-        if hasattr(self, "restore_selected_btn"):
-            selected_throttled_count = len([
-                ip for ip in self.selected_device_ips
-                if ip in self.engine.devices and self.engine.devices[ip].is_throttled
-            ])
-            self.restore_selected_btn.configure(
-                text=f"Restore Selected ({selected_throttled_count})"
-            )
-
-        target_count = len([
-            d for d in self.engine.devices.values()
-            if self._is_target_device(d)
-        ])
-        if hasattr(self, "check_all_btn"):
-            if target_count > 0 and selected_count == target_count:
-                self.check_all_btn.configure(text="Uncheck All")
-            else:
-                self.check_all_btn.configure(text="Check All")
-
-    def _toggle_select_all(self):
-        target_ips = {
-            d.ip for d in self.engine.devices.values()
-            if self._is_target_device(d)
-        }
-        if not target_ips:
-            messagebox.showinfo("Info", "No target devices available.")
-            return
-
-        if target_ips.issubset(self.selected_device_ips):
-            self.selected_device_ips.difference_update(target_ips)
-        else:
-            self.selected_device_ips.update(target_ips)
-            for ip in target_ips:
-                self.device_lag_percents.setdefault(ip, 100)
-
-        self._refresh_batch_controls()
-        self._refresh_device_list()
-
-    def _clear_selection(self):
-        self.selected_device_ips.clear()
-        self._refresh_batch_controls()
-        self._refresh_device_list()
-
-    def _lag_selected(self):
-        selected_ips = [
-            ip for ip in self.selected_device_ips
-            if ip in self.engine.devices and self._is_target_device(self.engine.devices[ip])
-        ]
-        if not selected_ips:
-            messagebox.showinfo("Info", "Belum ada device yang dipilih.")
-            return
-
-        actionable = []
-        skipped = 0
-        for ip in selected_ips:
-            lag_percent = self._get_lag_percent(ip)
-            level = self._lag_percent_to_level(lag_percent)
-            if lag_percent <= 0 or level >= 100:
-                skipped += 1
-                continue
-            actionable.append((ip, level, lag_percent))
-
-        if not actionable:
-            messagebox.showinfo(
-                "Lag Selected",
-                "Semua device terpilih punya lag 0%.\nNaikkan lag speed per device dulu."
-            )
-            return
-
-        confirm = messagebox.askyesno(
-            "Confirm Lag Selected",
-            f"Lag {len(actionable)} selected device(s)?\nSkipped (0%): {skipped}"
+    def _schedule_lag_apply(self, ip: str):
+        previous_job = self.pending_lag_apply_jobs.pop(ip, None)
+        if previous_job:
+            self.after_cancel(previous_job)
+        self.pending_lag_apply_jobs[ip] = self.after(
+            self.lag_apply_delay_ms,
+            lambda target_ip=ip: self._apply_lag_change(target_ip)
         )
-        if not confirm:
+
+    def _mark_lag_interaction(self):
+        self.last_lag_interaction_ts = time.time()
+
+    def _apply_lag_change(self, ip: str):
+        self.pending_lag_apply_jobs.pop(ip, None)
+        device = self.engine.devices.get(ip)
+        if not device or not self._is_target_device(device):
             return
 
-        for ip, level, _lag_percent in actionable:
-            threading.Thread(
-                target=self.engine.throttle_device,
-                args=(ip, level),
-                daemon=True
-            ).start()
-
-    def _restore_selected(self):
-        selected_ips = [
-            ip for ip in self.selected_device_ips
-            if ip in self.engine.devices and self._is_target_device(self.engine.devices[ip])
-        ]
-        if not selected_ips:
-            messagebox.showinfo("Info", "Belum ada device yang dipilih.")
+        lag_percent = self._get_lag_percent(ip)
+        if lag_percent <= 0:
+            if device.is_throttled:
+                threading.Thread(
+                    target=self.engine.restore_device,
+                    args=(ip,),
+                    daemon=True
+                ).start()
             return
 
-        restore_targets = [
-            ip for ip in selected_ips
-            if self.engine.devices[ip].is_throttled
-        ]
-        if not restore_targets:
-            messagebox.showinfo(
-                "Restore Selected",
-                "Tidak ada device terpilih yang sedang di-throttle."
-            )
-            return
-
-        confirm = messagebox.askyesno(
-            "Confirm Restore Selected",
-            f"Restore {len(restore_targets)} selected throttled device(s)?"
-        )
-        if not confirm:
-            return
-
-        for ip in restore_targets:
-            threading.Thread(
-                target=self.engine.restore_device,
-                args=(ip,),
-                daemon=True
-            ).start()
+        level = self._lag_percent_to_level(lag_percent)
+        threading.Thread(
+            target=self.engine.throttle_device,
+            args=(ip, level),
+            daemon=True
+        ).start()
 
     def _scan_network(self):
         if not self.engine.interface:
             messagebox.showwarning("Warning", "Please select a network interface first.")
             return
 
-        self.scan_btn.configure(state="disabled", text="⏳ Scanning...")
+        self.scan_in_progress = True
+        self.scan_btn.configure(state="disabled", text="Scanning...")
         self.engine.scan_network(callback=self._on_scan_complete)
 
+    def _flush_arp_admin(self):
+        if not self._is_admin:
+            messagebox.showwarning(
+                "Admin Required",
+                "Flush ARP membutuhkan hak Administrator.\nJalankan app sebagai Administrator."
+            )
+            return
+
+        self.flush_arp_btn.configure(state="disabled", text="Flushing...")
+
+        def _run_flush():
+            success, message = self.engine.flush_arp_cache()
+
+            def _done():
+                self.flush_arp_btn.configure(state="normal", text="Flush ARP (Admin)")
+                if success:
+                    messagebox.showinfo("Flush ARP", message)
+                else:
+                    messagebox.showwarning("Flush ARP", message)
+
+            self.after(0, _done)
+
+        threading.Thread(target=_run_flush, daemon=True).start()
+
     def _on_scan_complete(self):
-        self.after(0, lambda: self.scan_btn.configure(state="normal", text="Scan Network"))
+        def _done():
+            self.scan_in_progress = False
+            self.scan_btn.configure(state="normal", text="Scan Network")
+            self._refresh_device_list()
+        self.after(0, _done)
 
     def _on_devices_updated(self):
-        self.after(0, self._refresh_device_list)
+        self.after(0, self._handle_devices_updated_ui)
+
+    def _handle_devices_updated_ui(self):
+        if self.scan_in_progress:
+            self._refresh_device_list()
 
     def _on_status_changed(self, message: str):
         self.after(0, lambda: self._update_status(message))
@@ -928,16 +778,15 @@ class WiFiThrottlerApp(ctk.CTk):
         header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         self._configure_list_columns(header)
 
-        for idx, title in enumerate(["Sel", "Device", "IP", "MAC", "Type", "Lag %", "Status", "Action"]):
+        for idx, title in enumerate(["Device", "IP", "MAC", "Type", "Lag %", "Status"]):
             label = ctk.CTkLabel(
                 header,
                 text=title,
                 font=FONTS["small"],
                 text_color=COLORS["text_secondary"],
-                anchor="w",
-                width=self.list_label_widths.get(idx, 100)
+                anchor="center"
             )
-            label.grid(row=0, column=idx, sticky="w", padx=8, pady=8)
+            label.grid(row=0, column=idx, sticky="nsew", padx=8, pady=8)
 
         for idx, device in enumerate(devices, start=1):
             row = ctk.CTkFrame(
@@ -953,32 +802,10 @@ class WiFiThrottlerApp(ctk.CTk):
 
     def _configure_list_columns(self, frame: ctk.CTkFrame):
         for col, minsize in self.list_column_minsize.items():
-            weight = 1 if col in (1, 5) else 0
+            weight = 1
             frame.grid_columnconfigure(col, weight=weight, minsize=minsize)
 
     def _populate_list_row(self, row: ctk.CTkFrame, device: NetworkDevice):
-        if self._is_target_device(device):
-            selected_var = ctk.BooleanVar(value=(device.ip in self.selected_device_ips))
-            select_cb = ctk.CTkCheckBox(
-                row,
-                text="",
-                variable=selected_var,
-                width=16,
-                checkbox_width=16,
-                checkbox_height=16,
-                command=lambda ip=device.ip, var=selected_var: self._set_device_selected(ip, bool(var.get()))
-            )
-            select_cb.grid(row=0, column=0, sticky="w", padx=8, pady=8)
-        else:
-            protected = ctk.CTkLabel(
-                row,
-                text="-",
-                font=FONTS["small"],
-                text_color=COLORS["text_muted"],
-                width=self.list_label_widths.get(0, 28)
-            )
-            protected.grid(row=0, column=0, sticky="w", padx=8, pady=8)
-
         values = [
             self._device_display_name(device),
             device.ip,
@@ -993,19 +820,20 @@ class WiFiThrottlerApp(ctk.CTk):
         ]
         fonts = [FONTS["small"], FONTS["mono_small"], FONTS["mono_small"], FONTS["small"]]
 
-        for idx, value in enumerate(values, start=1):
+        for idx, value in enumerate(values):
             label = ctk.CTkLabel(
                 row,
                 text=value,
-                font=fonts[idx - 1],
-                text_color=colors[idx - 1],
-                anchor="w",
-                width=self.list_label_widths.get(idx, 100)
+                font=fonts[idx],
+                text_color=colors[idx],
+                anchor="center"
             )
-            label.grid(row=0, column=idx, sticky="w", padx=8, pady=8)
+            label.grid(row=0, column=idx, sticky="nsew", padx=8, pady=8)
 
         lag_frame = ctk.CTkFrame(row, fg_color="transparent")
-        lag_frame.grid(row=0, column=5, sticky="ew", padx=8, pady=6)
+        lag_frame.grid(row=0, column=4, sticky="nsew", padx=8, pady=6)
+        lag_frame.grid_columnconfigure(0, weight=1)
+        lag_frame.grid_columnconfigure(1, weight=1)
         if self._is_target_device(device):
             lag_var = ctk.IntVar(value=self._get_lag_percent(device.ip))
             lag_slider = ctk.CTkSlider(
@@ -1029,77 +857,34 @@ class WiFiThrottlerApp(ctk.CTk):
 
             def on_lag_change(value, ip=device.ip, var=lag_var, label_ref=lag_value):
                 lag_percent = max(0, min(100, int(round(float(value)))))
+                self._mark_lag_interaction()
                 var.set(lag_percent)
                 label_ref.configure(text=f"{lag_percent}%")
                 self._set_lag_percent(ip, lag_percent)
+                self._schedule_lag_apply(ip)
 
             lag_slider.configure(command=on_lag_change)
             lag_slider.set(lag_var.get())
-            lag_slider.pack(side="left", padx=(0, 4))
-            lag_value.pack(side="left")
+            lag_slider.grid(row=0, column=0, sticky="e", padx=(0, 6))
+            lag_value.grid(row=0, column=1, sticky="w")
         else:
             lag_na = ctk.CTkLabel(
                 lag_frame,
                 text="-",
                 font=FONTS["small"],
-                text_color=COLORS["text_muted"]
+                text_color=COLORS["text_muted"],
+                anchor="center"
             )
-            lag_na.pack(anchor="w")
+            lag_na.grid(row=0, column=0, columnspan=2, sticky="nsew")
 
         status_label = ctk.CTkLabel(
             row,
             text=self._device_status_label(device),
             font=FONTS["small"],
             text_color=self._status_color(device),
-            anchor="w"
+            anchor="center"
         )
-        status_label.grid(row=0, column=6, sticky="w", padx=8, pady=8)
-
-        action_frame = ctk.CTkFrame(row, fg_color="transparent")
-        action_frame.grid(row=0, column=7, sticky="e", padx=8, pady=6)
-        self._create_action_widget(action_frame, device)
-
-    def _create_action_widget(self, parent: ctk.CTkFrame, device: NetworkDevice):
-        if device.is_self or device.is_gateway:
-            label = ctk.CTkLabel(
-                parent,
-                text="Protected",
-                font=FONTS["tiny"],
-                text_color=COLORS["text_muted"]
-            )
-            label.pack()
-            return
-
-        if device.is_throttled:
-            button = ctk.CTkButton(
-                parent,
-                text="Restore",
-                font=FONTS["tiny"],
-                fg_color=COLORS["accent_success"],
-                hover_color=COLORS["accent_success_hover"],
-                text_color="white",
-                corner_radius=8,
-                width=86,
-                height=28,
-                command=lambda: self._restore_device(device.ip)
-            )
-        else:
-            button = ctk.CTkButton(
-                parent,
-                text="Lag",
-                font=FONTS["tiny"],
-                fg_color=COLORS["accent_danger"],
-                hover_color=COLORS["accent_danger_hover"],
-                text_color="white",
-                corner_radius=8,
-                width=86,
-                height=28,
-                command=lambda: self._throttle_device(
-                    device.ip,
-                    self._lag_percent_to_level(self._get_lag_percent(device.ip))
-                )
-            )
-        button.pack()
+        status_label.grid(row=0, column=5, sticky="nsew", padx=8, pady=8)
 
     def _device_display_name(self, device: NetworkDevice) -> str:
         if device.is_self:
@@ -1130,59 +915,12 @@ class WiFiThrottlerApp(ctk.CTk):
             return COLORS["throttled_bg"]
         return COLORS["bg_card"]
 
-    def _throttle_device(self, ip: str, level: int):
-        """Throttle a device."""
-        device = self.engine.devices.get(ip)
-        if device:
-            level = max(0, min(100, int(level)))
-            lag_percent = 100 - level
-            if lag_percent <= 0:
-                messagebox.showinfo(
-                    "Lag Speed 0%",
-                    "Lag speed untuk device ini masih 0%.\n\nNaikkan Lag % di samping device."
-                )
-                return
-
-            confirm = messagebox.askyesno(
-                "Confirm Throttle",
-                f"Lag device {device.hostname} ({ip})?\n\n"
-                f"Lag speed: {lag_percent}%.\n"
-                f"This will slow down or block their internet connection."
-            )
-            if confirm:
-                threading.Thread(
-                    target=self.engine.throttle_device,
-                    args=(ip, level),
-                    daemon=True
-                ).start()
-
-    def _restore_device(self, ip: str):
-        """Restore a device to normal."""
-        threading.Thread(
-            target=self.engine.restore_device,
-            args=(ip,),
-            daemon=True
-        ).start()
-
-    def _restore_all(self):
-        """Restore all throttled devices."""
-        throttled = [d for d in self.engine.devices.values() if d.is_throttled]
-        if not throttled:
-            messagebox.showinfo("Info", "No devices are currently throttled.")
-            return
-
-        confirm = messagebox.askyesno(
-            "Confirm Restore All",
-            f"Restore all {len(throttled)} throttled devices to normal?"
-        )
-        if confirm:
-            threading.Thread(
-                target=self.engine.restore_all,
-                daemon=True
-            ).start()
-
     def _on_close(self):
         """Handle window close - cleanup all spoofing."""
+        for after_id in self.pending_lag_apply_jobs.values():
+            self.after_cancel(after_id)
+        self.pending_lag_apply_jobs.clear()
+
         self._update_status("Cleaning up... Restoring all devices...")
         self.update()
 
@@ -1192,3 +930,4 @@ class WiFiThrottlerApp(ctk.CTk):
             self.after(0, self.destroy)
 
         threading.Thread(target=_cleanup, daemon=True).start()
+

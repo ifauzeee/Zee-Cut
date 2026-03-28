@@ -22,3 +22,7 @@ venv/
 # OS
 Thumbs.db
 .DS_Store
+
+# Runtime logs
+logs/
+*.log

