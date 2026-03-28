@@ -224,6 +224,8 @@ class WiFiThrottlerApp(ctk.CTk):
         self.engine = NetworkEngine()
         self.engine.on_devices_updated = self._on_devices_updated
         self.engine.on_status_changed = self._on_status_changed
+        self.view_mode_var = ctk.StringVar(value="Card View")
+        self.filter_mode_var = ctk.StringVar(value="All Devices")
 
         self._setup_window()
         self._create_layout()
@@ -331,10 +333,58 @@ class WiFiThrottlerApp(ctk.CTk):
             dropdown_fg_color=COLORS["bg_card"],
             dropdown_hover_color=COLORS["bg_card_hover"],
             corner_radius=8,
-            width=300,
+            width=190,
             command=self._on_interface_selected
         )
         self.iface_dropdown.pack(side="left", padx=(0, 12))
+
+        view_label = ctk.CTkLabel(
+            left_toolbar,
+            text="View:",
+            font=FONTS["small"],
+            text_color=COLORS["text_secondary"]
+        )
+        view_label.pack(side="left", padx=(0, 6))
+
+        self.view_mode_dropdown = ctk.CTkOptionMenu(
+            left_toolbar,
+            variable=self.view_mode_var,
+            values=["Card View", "List View", "Compact View"],
+            font=FONTS["small"],
+            fg_color=COLORS["bg_input"],
+            button_color=COLORS["accent_primary"],
+            button_hover_color=COLORS["accent_primary_hover"],
+            dropdown_fg_color=COLORS["bg_card"],
+            dropdown_hover_color=COLORS["bg_card_hover"],
+            corner_radius=8,
+            width=105,
+            command=self._on_view_mode_changed
+        )
+        self.view_mode_dropdown.pack(side="left", padx=(0, 10))
+
+        mode_label = ctk.CTkLabel(
+            left_toolbar,
+            text="Mode:",
+            font=FONTS["small"],
+            text_color=COLORS["text_secondary"]
+        )
+        mode_label.pack(side="left", padx=(0, 6))
+
+        self.filter_mode_dropdown = ctk.CTkOptionMenu(
+            left_toolbar,
+            variable=self.filter_mode_var,
+            values=["All Devices", "Targets Only", "Throttled Only", "Protected Only"],
+            font=FONTS["small"],
+            fg_color=COLORS["bg_input"],
+            button_color=COLORS["accent_primary"],
+            button_hover_color=COLORS["accent_primary_hover"],
+            dropdown_fg_color=COLORS["bg_card"],
+            dropdown_hover_color=COLORS["bg_card_hover"],
+            corner_radius=8,
+            width=125,
+            command=self._on_filter_mode_changed
+        )
+        self.filter_mode_dropdown.pack(side="left", padx=(0, 10))
 
         # Right toolbar buttons
         right_toolbar = ctk.CTkFrame(toolbar, fg_color="transparent")
@@ -348,7 +398,7 @@ class WiFiThrottlerApp(ctk.CTk):
             fg_color=COLORS["accent_primary"],
             hover_color=COLORS["accent_primary_hover"],
             corner_radius=8,
-            width=150,
+            width=130,
             height=38,
             command=self._scan_network
         )
@@ -362,7 +412,7 @@ class WiFiThrottlerApp(ctk.CTk):
             fg_color=COLORS["accent_success"],
             hover_color=COLORS["accent_success_hover"],
             corner_radius=8,
-            width=140,
+            width=120,
             height=38,
             command=self._restore_all
         )
@@ -508,6 +558,12 @@ class WiFiThrottlerApp(ctk.CTk):
                 f"Interface: {iface.display_name} | IP: {iface.ip} | Gateway: {iface.gateway_ip}"
             )
 
+    def _on_view_mode_changed(self, _choice: str):
+        self._refresh_device_list()
+
+    def _on_filter_mode_changed(self, _choice: str):
+        self._refresh_device_list()
+
     def _scan_network(self):
         if not self.engine.interface:
             messagebox.showwarning("Warning", "Please select a network interface first.")
@@ -532,11 +588,13 @@ class WiFiThrottlerApp(ctk.CTk):
         self.throttle_count_label.configure(text=f"Throttled: {throttled}")
 
     def _refresh_device_list(self):
-        # Clear existing cards
+        if not hasattr(self, "device_scroll"):
+            return
+
         for widget in self.device_scroll.winfo_children():
             widget.destroy()
 
-        devices = sorted(
+        all_devices = sorted(
             self.engine.devices.values(),
             key=lambda d: (
                 not d.is_self,
@@ -546,28 +604,71 @@ class WiFiThrottlerApp(ctk.CTk):
             )
         )
 
-        if not devices:
-            self.empty_state = ctk.CTkFrame(self.device_scroll, fg_color="transparent")
-            self.empty_state.grid(row=0, column=0, sticky="nsew", pady=80)
-
-            empty_icon = ctk.CTkLabel(
-                self.empty_state, text="📡",
-                font=("Segoe UI Emoji", 48)
-            )
-            empty_icon.pack(pady=(0, 16))
-
-            empty_title = ctk.CTkLabel(
-                self.empty_state,
-                text="No Devices Found",
-                font=FONTS["subtitle"],
-                text_color=COLORS["text_secondary"]
-            )
-            empty_title.pack()
+        if not all_devices:
+            self.device_header.configure(text="Connected Devices (0)")
+            self._render_empty_state("No devices found on this network.")
+            self.throttle_count_label.configure(text="Throttled: 0")
             return
 
-        other_count = sum(1 for d in devices if not d.is_self and not d.is_gateway)
-        self.device_header.configure(text=f"📋 Connected Devices ({other_count})")
+        filtered_devices = self._filter_devices(all_devices)
+        self.device_header.configure(
+            text=f"Connected Devices ({len(filtered_devices)}/{len(all_devices)})"
+        )
 
+        if not filtered_devices:
+            self._render_empty_state(
+                f"No device matches mode '{self.filter_mode_var.get()}'."
+            )
+        else:
+            view_mode = self.view_mode_var.get()
+            if view_mode == "List View":
+                self._render_list_view(filtered_devices)
+            elif view_mode == "Compact View":
+                self._render_compact_view(filtered_devices)
+            else:
+                self._render_card_view(filtered_devices)
+
+        throttled = sum(1 for d in all_devices if d.is_throttled)
+        self.throttle_count_label.configure(text=f"Throttled: {throttled}")
+
+    def _filter_devices(self, devices: list[NetworkDevice]) -> list[NetworkDevice]:
+        mode = self.filter_mode_var.get()
+        if mode == "Targets Only":
+            return [d for d in devices if not d.is_self and not d.is_gateway]
+        if mode == "Throttled Only":
+            return [d for d in devices if d.is_throttled]
+        if mode == "Protected Only":
+            return [d for d in devices if d.is_self or d.is_gateway]
+        return devices
+
+    def _render_empty_state(self, message: str):
+        self.empty_state = ctk.CTkFrame(self.device_scroll, fg_color="transparent")
+        self.empty_state.grid(row=0, column=0, sticky="nsew", pady=80)
+
+        empty_icon = ctk.CTkLabel(
+            self.empty_state,
+            text="📡",
+            font=("Segoe UI Emoji", 48)
+        )
+        empty_icon.pack(pady=(0, 16))
+
+        empty_title = ctk.CTkLabel(
+            self.empty_state,
+            text="No Devices Found",
+            font=FONTS["subtitle"],
+            text_color=COLORS["text_secondary"]
+        )
+        empty_title.pack(pady=(0, 8))
+
+        empty_desc = ctk.CTkLabel(
+            self.empty_state,
+            text=message,
+            font=FONTS["small"],
+            text_color=COLORS["text_muted"]
+        )
+        empty_desc.pack()
+
+    def _render_card_view(self, devices: list[NetworkDevice]):
         for idx, device in enumerate(devices):
             card = DeviceCard(
                 self.device_scroll,
@@ -577,9 +678,174 @@ class WiFiThrottlerApp(ctk.CTk):
             )
             card.grid(row=idx, column=0, sticky="ew", pady=(0, 6))
 
-        # Update throttle count
-        throttled = sum(1 for d in devices if d.is_throttled)
-        self.throttle_count_label.configure(text=f"Throttled: {throttled}")
+    def _render_list_view(self, devices: list[NetworkDevice]):
+        header = ctk.CTkFrame(
+            self.device_scroll,
+            fg_color=COLORS["bg_card"],
+            corner_radius=8,
+            border_width=1,
+            border_color=COLORS["border"]
+        )
+        header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self._configure_list_columns(header)
+
+        for idx, title in enumerate(["Device", "IP", "MAC", "Type", "Status", "Action"]):
+            label = ctk.CTkLabel(
+                header,
+                text=title,
+                font=FONTS["small"],
+                text_color=COLORS["text_secondary"],
+                anchor="w"
+            )
+            label.grid(row=0, column=idx, sticky="w", padx=8, pady=8)
+
+        for idx, device in enumerate(devices, start=1):
+            row = ctk.CTkFrame(
+                self.device_scroll,
+                fg_color=self._get_row_color(device),
+                corner_radius=8,
+                border_width=1,
+                border_color=COLORS["border"]
+            )
+            row.grid(row=idx, column=0, sticky="ew", pady=(0, 4))
+            self._configure_list_columns(row)
+            self._populate_list_row(row, device)
+
+    def _render_compact_view(self, devices: list[NetworkDevice]):
+        for idx, device in enumerate(devices):
+            row = ctk.CTkFrame(
+                self.device_scroll,
+                fg_color=self._get_row_color(device),
+                corner_radius=8,
+                border_width=1,
+                border_color=COLORS["border"]
+            )
+            row.grid(row=idx, column=0, sticky="ew", pady=(0, 4))
+            row.grid_columnconfigure(0, weight=1)
+
+            summary = (
+                f"{self._device_display_name(device)} | "
+                f"{device.ip} | {self._device_status_label(device)}"
+            )
+            label = ctk.CTkLabel(
+                row,
+                text=summary,
+                font=FONTS["small"],
+                text_color=COLORS["text_primary"],
+                anchor="w"
+            )
+            label.grid(row=0, column=0, sticky="w", padx=10, pady=8)
+
+            action_frame = ctk.CTkFrame(row, fg_color="transparent")
+            action_frame.grid(row=0, column=1, sticky="e", padx=10, pady=6)
+            self._create_action_widget(action_frame, device)
+
+    def _configure_list_columns(self, frame: ctk.CTkFrame):
+        frame.grid_columnconfigure(0, weight=3)
+        frame.grid_columnconfigure(1, weight=2)
+        frame.grid_columnconfigure(2, weight=3)
+        frame.grid_columnconfigure(3, weight=2)
+        frame.grid_columnconfigure(4, weight=2)
+        frame.grid_columnconfigure(5, weight=2)
+
+    def _populate_list_row(self, row: ctk.CTkFrame, device: NetworkDevice):
+        values = [
+            self._device_display_name(device),
+            device.ip,
+            device.mac.upper(),
+            self._device_type_label(device),
+            self._device_status_label(device),
+        ]
+        colors = [
+            COLORS["text_primary"],
+            COLORS["text_secondary"],
+            COLORS["text_muted"],
+            COLORS["text_secondary"],
+            self._status_color(device),
+        ]
+        fonts = [FONTS["small"], FONTS["mono_small"], FONTS["mono_small"], FONTS["small"], FONTS["small"]]
+
+        for col, value in enumerate(values):
+            label = ctk.CTkLabel(
+                row,
+                text=value,
+                font=fonts[col],
+                text_color=colors[col],
+                anchor="w"
+            )
+            label.grid(row=0, column=col, sticky="w", padx=8, pady=8)
+
+        action_frame = ctk.CTkFrame(row, fg_color="transparent")
+        action_frame.grid(row=0, column=5, sticky="e", padx=8, pady=6)
+        self._create_action_widget(action_frame, device)
+
+    def _create_action_widget(self, parent: ctk.CTkFrame, device: NetworkDevice):
+        if device.is_self or device.is_gateway:
+            label = ctk.CTkLabel(
+                parent,
+                text="Protected",
+                font=FONTS["tiny"],
+                text_color=COLORS["text_muted"]
+            )
+            label.pack()
+            return
+
+        if device.is_throttled:
+            button = ctk.CTkButton(
+                parent,
+                text="Restore",
+                font=FONTS["tiny"],
+                fg_color=COLORS["accent_success"],
+                hover_color=COLORS["accent_success_hover"],
+                text_color="white",
+                corner_radius=8,
+                width=86,
+                height=28,
+                command=lambda: self._restore_device(device.ip)
+            )
+        else:
+            button = ctk.CTkButton(
+                parent,
+                text="Lag",
+                font=FONTS["tiny"],
+                fg_color=COLORS["accent_danger"],
+                hover_color=COLORS["accent_danger_hover"],
+                text_color="white",
+                corner_radius=8,
+                width=86,
+                height=28,
+                command=lambda: self._throttle_device(device.ip, 0)
+            )
+        button.pack()
+
+    def _device_display_name(self, device: NetworkDevice) -> str:
+        if device.is_self:
+            return f"{device.hostname} (You)"
+        if device.is_gateway:
+            return f"{device.hostname} (Gateway)"
+        return device.hostname
+
+    def _device_type_label(self, device: NetworkDevice) -> str:
+        if device.is_self:
+            return "Self"
+        if device.is_gateway:
+            return "Gateway"
+        return "Target"
+
+    def _device_status_label(self, device: NetworkDevice) -> str:
+        return "Throttled" if device.is_throttled else "Normal"
+
+    def _status_color(self, device: NetworkDevice) -> str:
+        return COLORS["accent_danger"] if device.is_throttled else COLORS["accent_success"]
+
+    def _get_row_color(self, device: NetworkDevice) -> str:
+        if device.is_self:
+            return COLORS["self_bg"]
+        if device.is_gateway:
+            return COLORS["gateway_bg"]
+        if device.is_throttled:
+            return COLORS["throttled_bg"]
+        return COLORS["bg_card"]
 
     def _throttle_device(self, ip: str, level: int):
         """Throttle a device."""
