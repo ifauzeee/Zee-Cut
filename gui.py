@@ -6,44 +6,72 @@ Advanced WiFi Network Device Controller.
 import customtkinter as ctk
 from tkinter import messagebox
 import threading
-import time
 import sys
 import os
-from typing import Optional
+import webbrowser
 
-from core.network import NetworkEngine, NetworkDevice, NetworkInterface
+from core.network import NetworkEngine, NetworkDevice
 
 # ─── Theme Configuration ───────────────────────────────────────────────────────
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-# Color palette
-COLORS = {
-    "bg_dark": "#0a0e17",
-    "bg_card": "#111827",
-    "bg_card_hover": "#1a2332",
-    "bg_input": "#1e293b",
-    "accent_primary": "#6366f1",
-    "accent_primary_hover": "#818cf8",
-    "accent_danger": "#ef4444",
-    "accent_danger_hover": "#f87171",
-    "accent_success": "#10b981",
-    "accent_success_hover": "#34d399",
-    "accent_warning": "#f59e0b",
-    "accent_warning_hover": "#fbbf24",
-    "text_primary": "#f1f5f9",
-    "text_secondary": "#94a3b8",
-    "text_muted": "#64748b",
-    "border": "#1e293b",
-    "border_light": "#334155",
-    "gradient_start": "#6366f1",
-    "gradient_end": "#8b5cf6",
-    "throttled_bg": "#1c1017",
-    "normal_bg": "#111827",
-    "self_bg": "#0d1a2d",
-    "gateway_bg": "#0d1f17",
+# Theme palettes
+THEMES = {
+    "amoled": {
+        "bg_dark": "#000000",
+        "bg_card": "#050505",
+        "bg_card_hover": "#111111",
+        "bg_input": "#0f0f10",
+        "accent_primary": "#3b82f6",
+        "accent_primary_hover": "#60a5fa",
+        "accent_danger": "#ef4444",
+        "accent_danger_hover": "#f87171",
+        "accent_success": "#10b981",
+        "accent_success_hover": "#34d399",
+        "accent_warning": "#f59e0b",
+        "accent_warning_hover": "#fbbf24",
+        "text_primary": "#f8fafc",
+        "text_secondary": "#cbd5e1",
+        "text_muted": "#94a3b8",
+        "border": "#171717",
+        "border_light": "#262626",
+        "gradient_start": "#3b82f6",
+        "gradient_end": "#0ea5e9",
+        "throttled_bg": "#1a0909",
+        "normal_bg": "#050505",
+        "self_bg": "#071223",
+        "gateway_bg": "#07190f",
+    },
+    "google": {
+        "bg_dark": "#202124",
+        "bg_card": "#2d2f31",
+        "bg_card_hover": "#383b3d",
+        "bg_input": "#3c4043",
+        "accent_primary": "#8ab4f8",
+        "accent_primary_hover": "#a8c7fa",
+        "accent_danger": "#f28b82",
+        "accent_danger_hover": "#f6aea9",
+        "accent_success": "#81c995",
+        "accent_success_hover": "#9fd8ad",
+        "accent_warning": "#fdd663",
+        "accent_warning_hover": "#fde293",
+        "text_primary": "#e8eaed",
+        "text_secondary": "#c7c9cc",
+        "text_muted": "#9aa0a6",
+        "border": "#444746",
+        "border_light": "#5f6368",
+        "gradient_start": "#8ab4f8",
+        "gradient_end": "#81c995",
+        "throttled_bg": "#3a1f1f",
+        "normal_bg": "#2d2f31",
+        "self_bg": "#1f2f44",
+        "gateway_bg": "#1f3728",
+    },
 }
+
+COLORS = THEMES["amoled"].copy()
 
 FONTS = {
     "title": ("Segoe UI", 24, "bold"),
@@ -60,212 +88,6 @@ FONTS = {
 }
 
 
-class DeviceCard(ctk.CTkFrame):
-    """Individual device card widget with per-device selection and lag speed."""
-
-    def __init__(
-        self,
-        master,
-        device: NetworkDevice,
-        on_throttle,
-        on_restore,
-        is_selected,
-        on_selected_changed,
-        get_lag_percent,
-        on_lag_percent_changed,
-        **kwargs
-    ):
-        super().__init__(master, **kwargs)
-        self.device = device
-        self.on_throttle = on_throttle
-        self.on_restore = on_restore
-        self.is_selected = is_selected
-        self.on_selected_changed = on_selected_changed
-        self.get_lag_percent = get_lag_percent
-        self.on_lag_percent_changed = on_lag_percent_changed
-
-        self._setup_style()
-        self._create_widgets()
-
-    def _setup_style(self):
-        if self.device.is_self:
-            bg = COLORS["self_bg"]
-        elif self.device.is_gateway:
-            bg = COLORS["gateway_bg"]
-        elif self.device.is_throttled:
-            bg = COLORS["throttled_bg"]
-        else:
-            bg = COLORS["bg_card"]
-
-        self.configure(
-            fg_color=bg,
-            corner_radius=12,
-            border_width=1,
-            border_color=COLORS["border"]
-        )
-
-    def _create_widgets(self):
-        self.grid_columnconfigure(1, weight=1)
-
-        if self.device.is_self:
-            icon = "PC"
-            status_color = COLORS["accent_primary"]
-        elif self.device.is_gateway:
-            icon = "GW"
-            status_color = COLORS["accent_success"]
-        elif self.device.is_throttled:
-            icon = "TH"
-            status_color = COLORS["accent_danger"]
-        else:
-            icon = "DV"
-            status_color = COLORS["text_muted"]
-
-        icon_frame = ctk.CTkFrame(self, fg_color="transparent", width=50)
-        icon_frame.grid(row=0, column=0, rowspan=3, padx=(16, 8), pady=12, sticky="ns")
-        icon_frame.grid_propagate(False)
-
-        icon_label = ctk.CTkLabel(
-            icon_frame, text=icon, font=FONTS["small"],
-            text_color=COLORS["text_primary"]
-        )
-        icon_label.place(relx=0.5, rely=0.5, anchor="center")
-
-        dot_frame = ctk.CTkFrame(
-            icon_frame, width=12, height=12,
-            corner_radius=6, fg_color=status_color
-        )
-        dot_frame.place(relx=0.85, rely=0.2, anchor="center")
-
-        info_frame = ctk.CTkFrame(self, fg_color="transparent")
-        info_frame.grid(row=0, column=1, rowspan=3, padx=4, pady=12, sticky="nsew")
-
-        label_text = self.device.hostname
-        if self.device.is_self:
-            label_text += "  (You)"
-        elif self.device.is_gateway:
-            label_text += "  (Gateway)"
-
-        hostname_label = ctk.CTkLabel(
-            info_frame, text=label_text,
-            font=FONTS["body_bold"],
-            text_color=COLORS["text_primary"],
-            anchor="w"
-        )
-        hostname_label.pack(fill="x", pady=(0, 2))
-
-        ip_label = ctk.CTkLabel(
-            info_frame, text=f"IP: {self.device.ip}",
-            font=FONTS["mono_small"],
-            text_color=COLORS["text_secondary"],
-            anchor="w"
-        )
-        ip_label.pack(fill="x", pady=(0, 1))
-
-        mac_label = ctk.CTkLabel(
-            info_frame, text=f"MAC: {self.device.mac.upper()}",
-            font=FONTS["mono_small"],
-            text_color=COLORS["text_muted"],
-            anchor="w"
-        )
-        mac_label.pack(fill="x")
-
-        action_frame = ctk.CTkFrame(self, fg_color="transparent")
-        action_frame.grid(row=0, column=2, rowspan=3, padx=16, pady=10, sticky="e")
-
-        if self.device.is_self or self.device.is_gateway:
-            protected = ctk.CTkLabel(
-                action_frame,
-                text="Protected",
-                font=FONTS["tiny"],
-                text_color=COLORS["text_muted"]
-            )
-            protected.pack(pady=(10, 0))
-            return
-
-        self.selected_var = ctk.BooleanVar(value=self.is_selected)
-        select_cb = ctk.CTkCheckBox(
-            action_frame,
-            text="Select",
-            variable=self.selected_var,
-            font=FONTS["tiny"],
-            command=self._on_select_changed,
-            checkbox_width=16,
-            checkbox_height=16
-        )
-        select_cb.pack(anchor="e", pady=(0, 4))
-
-        initial_lag = int(self.get_lag_percent(self.device.ip))
-        self.lag_percent_var = ctk.IntVar(value=max(0, min(100, initial_lag)))
-
-        lag_row = ctk.CTkFrame(action_frame, fg_color="transparent")
-        lag_row.pack(fill="x", pady=(0, 4))
-        lag_row.grid_columnconfigure(0, weight=1)
-
-        self.lag_slider = ctk.CTkSlider(
-            lag_row,
-            from_=0,
-            to=100,
-            number_of_steps=100,
-            width=120,
-            button_color=COLORS["accent_danger"],
-            progress_color=COLORS["accent_danger"],
-            button_hover_color=COLORS["accent_danger_hover"],
-            command=self._on_lag_percent_changed
-        )
-        self.lag_slider.grid(row=0, column=0, padx=(0, 6), sticky="ew")
-        self.lag_slider.set(self.lag_percent_var.get())
-
-        self.lag_value_label = ctk.CTkLabel(
-            lag_row,
-            text=f"{self.lag_percent_var.get()}%",
-            font=FONTS["tiny"],
-            text_color=COLORS["text_secondary"],
-            width=34
-        )
-        self.lag_value_label.grid(row=0, column=1, sticky="e")
-
-        if self.device.is_throttled:
-            restore_btn = ctk.CTkButton(
-                action_frame,
-                text="Restore",
-                font=FONTS["small"],
-                fg_color=COLORS["accent_success"],
-                hover_color=COLORS["accent_success_hover"],
-                text_color="white",
-                corner_radius=8,
-                width=120,
-                height=32,
-                command=lambda: self.on_restore(self.device.ip)
-            )
-            restore_btn.pack(pady=(2, 0))
-        else:
-            lag_btn = ctk.CTkButton(
-                action_frame,
-                text="Lag Device",
-                font=FONTS["small"],
-                fg_color=COLORS["accent_danger"],
-                hover_color=COLORS["accent_danger_hover"],
-                text_color="white",
-                corner_radius=8,
-                width=120,
-                height=32,
-                command=lambda: self.on_throttle(self.device.ip, self._get_throttle_level())
-            )
-            lag_btn.pack(pady=(2, 0))
-
-    def _on_select_changed(self):
-        self.on_selected_changed(self.device.ip, bool(self.selected_var.get()))
-
-    def _on_lag_percent_changed(self, value: float):
-        lag_percent = max(0, min(100, int(round(float(value)))))
-        self.lag_percent_var.set(lag_percent)
-        self.lag_value_label.configure(text=f"{lag_percent}%")
-        self.on_lag_percent_changed(self.device.ip, lag_percent)
-
-    def _get_throttle_level(self) -> int:
-        return 100 - int(self.lag_percent_var.get())
-
-
 class WiFiThrottlerApp(ctk.CTk):
     """Main application window."""
 
@@ -275,10 +97,36 @@ class WiFiThrottlerApp(ctk.CTk):
         self.engine = NetworkEngine()
         self.engine.on_devices_updated = self._on_devices_updated
         self.engine.on_status_changed = self._on_status_changed
-        self.view_mode_var = ctk.StringVar(value="Card View")
+        self.theme_options = {
+            "AMOLED Black": "amoled",
+            "Google Dark": "google",
+        }
+        self.theme_var = ctk.StringVar(value="AMOLED Black")
         self.filter_mode_var = ctk.StringVar(value="All Devices")
         self.selected_device_ips: set[str] = set()
         self.device_lag_percents: dict[str, int] = {}
+        self.list_column_minsize = {
+            0: 64,   # Sel
+            1: 280,  # Device
+            2: 170,  # IP
+            3: 240,  # MAC
+            4: 120,  # Type
+            5: 220,  # Lag %
+            6: 140,  # Status
+            7: 132,  # Action
+        }
+        self.list_label_widths = {
+            0: 28,
+            1: 250,
+            2: 140,
+            3: 210,
+            4: 90,
+            5: 190,
+            6: 110,
+            7: 100,
+        }
+        self._is_admin = False
+        self._apply_theme(self.theme_options[self.theme_var.get()])
 
         self._setup_window()
         self._create_layout()
@@ -287,9 +135,9 @@ class WiFiThrottlerApp(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _setup_window(self):
-        self.title("Zee-Cut - Network Device Controller")
-        self.geometry("920x720")
-        self.minsize(800, 600)
+        self.title("Zee-Cut | Network Control Center")
+        self.geometry("1180x780")
+        self.minsize(980, 640)
         self.configure(fg_color=COLORS["bg_dark"])
 
         try:
@@ -315,55 +163,83 @@ class WiFiThrottlerApp(ctk.CTk):
     # ─── Header ─────────────────────────────────────────────────────────
 
     def _create_header(self):
-        header = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=0, height=80)
-        header.grid(row=0, column=0, sticky="ew")
-        header.grid_propagate(False)
-        header.grid_columnconfigure(1, weight=1)
+        self.header_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=0, height=86)
+        self.header_frame.grid(row=0, column=0, sticky="ew")
+        self.header_frame.grid_propagate(False)
+        self.header_frame.grid_columnconfigure(1, weight=1)
 
-        # App icon and title
-        title_frame = ctk.CTkFrame(header, fg_color="transparent")
+        title_frame = ctk.CTkFrame(self.header_frame, fg_color="transparent")
         title_frame.grid(row=0, column=0, padx=24, pady=16, sticky="w")
 
-        app_icon = ctk.CTkLabel(
-            title_frame, text="📡",
-            font=("Segoe UI Emoji", 30)
+        self.app_icon_label = ctk.CTkLabel(
+            title_frame,
+            text="\U0001F4F6",
+            font=("Segoe UI Emoji", 34),
+            text_color=COLORS["text_primary"],
+            width=44
         )
-        app_icon.pack(side="left", padx=(0, 12))
+        self.app_icon_label.pack(side="left", padx=(0, 12))
 
         title_text = ctk.CTkFrame(title_frame, fg_color="transparent")
         title_text.pack(side="left")
 
-        title = ctk.CTkLabel(
-            title_text, text="Zee-Cut",
+        self.title_label = ctk.CTkLabel(
+            title_text,
+            text="Zee-Cut",
             font=FONTS["title"],
             text_color=COLORS["text_primary"]
         )
-        title.pack(anchor="w")
+        self.title_label.pack(anchor="w")
 
-        subtitle = ctk.CTkLabel(
-            title_text, text="Network Device Controller",
+        self.subtitle_label = ctk.CTkLabel(
+            title_text,
+            text="Network Control Center",
             font=FONTS["small"],
             text_color=COLORS["text_muted"]
         )
-        subtitle.pack(anchor="w")
+        self.subtitle_label.pack(anchor="w")
 
-        # Admin badge
+        self.credit_label = ctk.CTkLabel(
+            title_text,
+            text="by Muhammad Ibnu Fauzi",
+            font=FONTS["tiny"],
+            text_color=COLORS["text_muted"]
+        )
+        self.credit_label.pack(anchor="w", pady=(1, 0))
+
+        header_actions = ctk.CTkFrame(self.header_frame, fg_color="transparent")
+        header_actions.grid(row=0, column=1, padx=24, pady=16, sticky="e")
+
+        self.github_btn = ctk.CTkButton(
+            header_actions,
+            text="\U0001F419 GitHub",
+            font=FONTS["small"],
+            fg_color=COLORS["bg_input"],
+            hover_color=COLORS["bg_card_hover"],
+            text_color=COLORS["text_primary"],
+            corner_radius=8,
+            width=118,
+            height=34,
+            command=self._open_github_repo
+        )
+        self.github_btn.pack(side="left", padx=(0, 10))
+
         self.admin_badge = ctk.CTkLabel(
-            header, text="",
+            header_actions,
+            text="",
             font=FONTS["tiny"],
             corner_radius=6,
         )
-        self.admin_badge.grid(row=0, column=1, padx=24, pady=16, sticky="e")
-
-    # ─── Toolbar ────────────────────────────────────────────────────────
+        self.admin_badge.pack(side="left")
+    # Toolbar
 
     def _create_toolbar(self):
-        toolbar = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=0, height=60)
-        toolbar.grid(row=1, column=0, sticky="ew", pady=(1, 0))
-        toolbar.grid_propagate(False)
-        toolbar.grid_columnconfigure(1, weight=1)
+        self.toolbar_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=0, height=60)
+        self.toolbar_frame.grid(row=1, column=0, sticky="ew", pady=(1, 0))
+        self.toolbar_frame.grid_propagate(False)
+        self.toolbar_frame.grid_columnconfigure(1, weight=1)
 
-        left_toolbar = ctk.CTkFrame(toolbar, fg_color="transparent")
+        left_toolbar = ctk.CTkFrame(self.toolbar_frame, fg_color="transparent")
         left_toolbar.grid(row=0, column=0, padx=16, pady=10, sticky="w")
 
         # Interface selector
@@ -391,30 +267,6 @@ class WiFiThrottlerApp(ctk.CTk):
         )
         self.iface_dropdown.pack(side="left", padx=(0, 12))
 
-        view_label = ctk.CTkLabel(
-            left_toolbar,
-            text="View:",
-            font=FONTS["small"],
-            text_color=COLORS["text_secondary"]
-        )
-        view_label.pack(side="left", padx=(0, 6))
-
-        self.view_mode_dropdown = ctk.CTkOptionMenu(
-            left_toolbar,
-            variable=self.view_mode_var,
-            values=["Card View", "List View", "Compact View"],
-            font=FONTS["small"],
-            fg_color=COLORS["bg_input"],
-            button_color=COLORS["accent_primary"],
-            button_hover_color=COLORS["accent_primary_hover"],
-            dropdown_fg_color=COLORS["bg_card"],
-            dropdown_hover_color=COLORS["bg_card_hover"],
-            corner_radius=8,
-            width=105,
-            command=self._on_view_mode_changed
-        )
-        self.view_mode_dropdown.pack(side="left", padx=(0, 10))
-
         mode_label = ctk.CTkLabel(
             left_toolbar,
             text="Mode:",
@@ -440,13 +292,37 @@ class WiFiThrottlerApp(ctk.CTk):
         self.filter_mode_dropdown.pack(side="left", padx=(0, 10))
 
         # Right toolbar buttons
-        right_toolbar = ctk.CTkFrame(toolbar, fg_color="transparent")
+        right_toolbar = ctk.CTkFrame(self.toolbar_frame, fg_color="transparent")
         right_toolbar.grid(row=0, column=1, padx=16, pady=10, sticky="e")
+
+        theme_label = ctk.CTkLabel(
+            right_toolbar,
+            text="Theme:",
+            font=FONTS["small"],
+            text_color=COLORS["text_secondary"]
+        )
+        theme_label.pack(side="left", padx=(0, 6))
+
+        self.theme_dropdown = ctk.CTkOptionMenu(
+            right_toolbar,
+            variable=self.theme_var,
+            values=list(self.theme_options.keys()),
+            font=FONTS["small"],
+            fg_color=COLORS["bg_input"],
+            button_color=COLORS["accent_primary"],
+            button_hover_color=COLORS["accent_primary_hover"],
+            dropdown_fg_color=COLORS["bg_card"],
+            dropdown_hover_color=COLORS["bg_card_hover"],
+            corner_radius=8,
+            width=130,
+            command=self._on_theme_changed
+        )
+        self.theme_dropdown.pack(side="left", padx=(0, 10))
 
         # Scan button
         self.scan_btn = ctk.CTkButton(
             right_toolbar,
-            text="🔍 Scan Network",
+            text="Scan Network",
             font=FONTS["body_bold"],
             fg_color=COLORS["accent_primary"],
             hover_color=COLORS["accent_primary_hover"],
@@ -460,7 +336,7 @@ class WiFiThrottlerApp(ctk.CTk):
         # Restore All button
         self.restore_all_btn = ctk.CTkButton(
             right_toolbar,
-            text="✅ Restore All",
+            text="Restore All",
             font=FONTS["body_bold"],
             fg_color=COLORS["accent_success"],
             hover_color=COLORS["accent_success_hover"],
@@ -483,24 +359,24 @@ class WiFiThrottlerApp(ctk.CTk):
         # Device count header
         self.device_header = ctk.CTkLabel(
             container,
-            text="📋 Connected Devices (0)",
+            text="Connected Devices (0)",
             font=FONTS["subtitle"],
             text_color=COLORS["text_primary"],
             anchor="w"
         )
         self.device_header.grid(row=0, column=0, sticky="w", pady=(0, 12))
 
-        batch_controls = ctk.CTkFrame(
+        self.batch_controls_frame = ctk.CTkFrame(
             container,
             fg_color=COLORS["bg_card"],
             corner_radius=8,
             border_width=1,
             border_color=COLORS["border"]
         )
-        batch_controls.grid(row=0, column=1, sticky="e", pady=(0, 12))
+        self.batch_controls_frame.grid(row=0, column=1, sticky="e", pady=(0, 12))
 
         self.check_all_btn = ctk.CTkButton(
-            batch_controls,
+            self.batch_controls_frame,
             text="Check All",
             font=FONTS["small"],
             fg_color=COLORS["bg_input"],
@@ -513,7 +389,7 @@ class WiFiThrottlerApp(ctk.CTk):
         self.check_all_btn.pack(side="left", padx=(8, 6), pady=6)
 
         self.clear_selection_btn = ctk.CTkButton(
-            batch_controls,
+            self.batch_controls_frame,
             text="Clear",
             font=FONTS["small"],
             fg_color=COLORS["bg_input"],
@@ -526,7 +402,7 @@ class WiFiThrottlerApp(ctk.CTk):
         self.clear_selection_btn.pack(side="left", padx=(0, 6), pady=6)
 
         self.lag_selected_btn = ctk.CTkButton(
-            batch_controls,
+            self.batch_controls_frame,
             text="Lag Selected (0)",
             font=FONTS["small"],
             fg_color=COLORS["accent_danger"],
@@ -539,7 +415,7 @@ class WiFiThrottlerApp(ctk.CTk):
         self.lag_selected_btn.pack(side="left", padx=(0, 6), pady=6)
 
         self.restore_selected_btn = ctk.CTkButton(
-            batch_controls,
+            self.batch_controls_frame,
             text="Restore Selected (0)",
             font=FONTS["small"],
             fg_color=COLORS["accent_success"],
@@ -592,13 +468,13 @@ class WiFiThrottlerApp(ctk.CTk):
     # ─── Status Bar ─────────────────────────────────────────────────────
 
     def _create_statusbar(self):
-        statusbar = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=0, height=32)
-        statusbar.grid(row=3, column=0, sticky="ew")
-        statusbar.grid_propagate(False)
-        statusbar.grid_columnconfigure(0, weight=1)
+        self.statusbar_frame = ctk.CTkFrame(self, fg_color=COLORS["bg_card"], corner_radius=0, height=32)
+        self.statusbar_frame.grid(row=3, column=0, sticky="ew")
+        self.statusbar_frame.grid_propagate(False)
+        self.statusbar_frame.grid_columnconfigure(0, weight=1)
 
         self.status_label = ctk.CTkLabel(
-            statusbar,
+            self.statusbar_frame,
             text="Ready - Select an interface to begin",
             font=FONTS["tiny"],
             text_color=COLORS["text_muted"],
@@ -607,7 +483,7 @@ class WiFiThrottlerApp(ctk.CTk):
         self.status_label.grid(row=0, column=0, padx=16, pady=4, sticky="w")
 
         self.throttle_count_label = ctk.CTkLabel(
-            statusbar,
+            self.statusbar_frame,
             text="Throttled: 0",
             font=FONTS["tiny"],
             text_color=COLORS["accent_warning"],
@@ -618,23 +494,30 @@ class WiFiThrottlerApp(ctk.CTk):
     # ─── Logic ──────────────────────────────────────────────────────────
 
     def _check_admin(self):
-        is_admin = self.engine.is_admin()
-        if is_admin:
-            self.admin_badge.configure(
-                text="🛡️ Administrator",
-                text_color=COLORS["accent_success"],
-                fg_color=COLORS["gateway_bg"]
-            )
+        self._is_admin = self.engine.is_admin()
+        self._apply_admin_badge_style()
+        if self._is_admin:
             self._load_interfaces()
             self.engine.enable_ip_forwarding()
         else:
+            self._show_admin_warning()
+            self._load_interfaces()
+
+    def _apply_admin_badge_style(self):
+        if not hasattr(self, "admin_badge"):
+            return
+        if self._is_admin:
             self.admin_badge.configure(
-                text="⚠️ Not Admin",
+                text="Administrator",
+                text_color=COLORS["accent_success"],
+                fg_color=COLORS["gateway_bg"]
+            )
+        else:
+            self.admin_badge.configure(
+                text="Not Admin",
                 text_color=COLORS["accent_warning"],
                 fg_color=COLORS["throttled_bg"]
             )
-            self._show_admin_warning()
-            self._load_interfaces()
 
     def _show_admin_warning(self):
         messagebox.showwarning(
@@ -674,11 +557,113 @@ class WiFiThrottlerApp(ctk.CTk):
                 f"Interface: {iface.display_name} | IP: {iface.ip} | Gateway: {iface.gateway_ip}"
             )
 
-    def _on_view_mode_changed(self, _choice: str):
-        self._refresh_device_list()
-
     def _on_filter_mode_changed(self, _choice: str):
         self._refresh_device_list()
+
+    def _on_theme_changed(self, choice: str):
+        theme_key = self.theme_options.get(choice, "amoled")
+        self._apply_theme(theme_key, refresh=True)
+
+    def _open_github_repo(self):
+        webbrowser.open_new_tab("https://github.com/ifauzeee/Zee-Cut")
+
+    def _apply_theme(self, theme_key: str, refresh: bool = False):
+        COLORS.clear()
+        COLORS.update(THEMES.get(theme_key, THEMES["amoled"]))
+
+        self.configure(fg_color=COLORS["bg_dark"])
+
+        if hasattr(self, "header_frame"):
+            self.header_frame.configure(fg_color=COLORS["bg_card"])
+        if hasattr(self, "toolbar_frame"):
+            self.toolbar_frame.configure(fg_color=COLORS["bg_card"])
+        if hasattr(self, "statusbar_frame"):
+            self.statusbar_frame.configure(fg_color=COLORS["bg_card"])
+        if hasattr(self, "batch_controls_frame"):
+            self.batch_controls_frame.configure(
+                fg_color=COLORS["bg_card"],
+                border_color=COLORS["border"]
+            )
+
+        if hasattr(self, "title_label"):
+            self.title_label.configure(text_color=COLORS["text_primary"])
+        if hasattr(self, "subtitle_label"):
+            self.subtitle_label.configure(text_color=COLORS["text_muted"])
+        if hasattr(self, "credit_label"):
+            self.credit_label.configure(text_color=COLORS["text_muted"])
+        if hasattr(self, "app_icon_label"):
+            self.app_icon_label.configure(text_color=COLORS["accent_primary"])
+        if hasattr(self, "github_btn"):
+            self.github_btn.configure(
+                fg_color=COLORS["bg_input"],
+                hover_color=COLORS["bg_card_hover"],
+                text_color=COLORS["text_primary"]
+            )
+
+        option_menus = [
+            "iface_dropdown",
+            "filter_mode_dropdown",
+            "theme_dropdown",
+        ]
+        for name in option_menus:
+            if hasattr(self, name):
+                getattr(self, name).configure(
+                    fg_color=COLORS["bg_input"],
+                    button_color=COLORS["accent_primary"],
+                    button_hover_color=COLORS["accent_primary_hover"],
+                    dropdown_fg_color=COLORS["bg_card"],
+                    dropdown_hover_color=COLORS["bg_card_hover"],
+                )
+
+        if hasattr(self, "scan_btn"):
+            self.scan_btn.configure(
+                fg_color=COLORS["accent_primary"],
+                hover_color=COLORS["accent_primary_hover"]
+            )
+        if hasattr(self, "restore_all_btn"):
+            self.restore_all_btn.configure(
+                fg_color=COLORS["accent_success"],
+                hover_color=COLORS["accent_success_hover"]
+            )
+        if hasattr(self, "check_all_btn"):
+            self.check_all_btn.configure(
+                fg_color=COLORS["bg_input"],
+                hover_color=COLORS["bg_card_hover"],
+                text_color=COLORS["text_primary"]
+            )
+        if hasattr(self, "clear_selection_btn"):
+            self.clear_selection_btn.configure(
+                fg_color=COLORS["bg_input"],
+                hover_color=COLORS["bg_card_hover"],
+                text_color=COLORS["text_primary"]
+            )
+        if hasattr(self, "lag_selected_btn"):
+            self.lag_selected_btn.configure(
+                fg_color=COLORS["accent_danger"],
+                hover_color=COLORS["accent_danger_hover"]
+            )
+        if hasattr(self, "restore_selected_btn"):
+            self.restore_selected_btn.configure(
+                fg_color=COLORS["accent_success"],
+                hover_color=COLORS["accent_success_hover"]
+            )
+
+        if hasattr(self, "device_header"):
+            self.device_header.configure(text_color=COLORS["text_primary"])
+        if hasattr(self, "status_label"):
+            self.status_label.configure(text_color=COLORS["text_muted"])
+        if hasattr(self, "throttle_count_label"):
+            self.throttle_count_label.configure(text_color=COLORS["accent_warning"])
+        if hasattr(self, "device_scroll"):
+            self.device_scroll.configure(
+                scrollbar_button_color=COLORS["border_light"],
+                scrollbar_button_hover_color=COLORS["accent_primary"]
+            )
+        if hasattr(self, "admin_badge"):
+            self._apply_admin_badge_style()
+
+        if refresh and hasattr(self, "device_scroll"):
+            self._refresh_device_list()
 
     def _is_target_device(self, device: NetworkDevice) -> bool:
         return not device.is_self and not device.is_gateway
@@ -842,7 +827,7 @@ class WiFiThrottlerApp(ctk.CTk):
         self.engine.scan_network(callback=self._on_scan_complete)
 
     def _on_scan_complete(self):
-        self.after(0, lambda: self.scan_btn.configure(state="normal", text="🔍 Scan Network"))
+        self.after(0, lambda: self.scan_btn.configure(state="normal", text="Scan Network"))
 
     def _on_devices_updated(self):
         self.after(0, self._refresh_device_list)
@@ -890,13 +875,7 @@ class WiFiThrottlerApp(ctk.CTk):
                 f"No device matches mode '{self.filter_mode_var.get()}'."
             )
         else:
-            view_mode = self.view_mode_var.get()
-            if view_mode == "List View":
-                self._render_list_view(filtered_devices)
-            elif view_mode == "Compact View":
-                self._render_compact_view(filtered_devices)
-            else:
-                self._render_card_view(filtered_devices)
+            self._render_list_view(filtered_devices)
 
         throttled = sum(1 for d in all_devices if d.is_throttled)
         self.throttle_count_label.configure(text=f"Throttled: {throttled}")
@@ -938,20 +917,6 @@ class WiFiThrottlerApp(ctk.CTk):
         )
         empty_desc.pack()
 
-    def _render_card_view(self, devices: list[NetworkDevice]):
-        for idx, device in enumerate(devices):
-            card = DeviceCard(
-                self.device_scroll,
-                device=device,
-                on_throttle=self._throttle_device,
-                on_restore=self._restore_device,
-                is_selected=(device.ip in self.selected_device_ips),
-                on_selected_changed=self._set_device_selected,
-                get_lag_percent=self._get_lag_percent,
-                on_lag_percent_changed=self._set_lag_percent
-            )
-            card.grid(row=idx, column=0, sticky="ew", pady=(0, 6))
-
     def _render_list_view(self, devices: list[NetworkDevice]):
         header = ctk.CTkFrame(
             self.device_scroll,
@@ -969,7 +934,8 @@ class WiFiThrottlerApp(ctk.CTk):
                 text=title,
                 font=FONTS["small"],
                 text_color=COLORS["text_secondary"],
-                anchor="w"
+                anchor="w",
+                width=self.list_label_widths.get(idx, 100)
             )
             label.grid(row=0, column=idx, sticky="w", padx=8, pady=8)
 
@@ -985,102 +951,10 @@ class WiFiThrottlerApp(ctk.CTk):
             self._configure_list_columns(row)
             self._populate_list_row(row, device)
 
-    def _render_compact_view(self, devices: list[NetworkDevice]):
-        for idx, device in enumerate(devices):
-            row = ctk.CTkFrame(
-                self.device_scroll,
-                fg_color=self._get_row_color(device),
-                corner_radius=8,
-                border_width=1,
-                border_color=COLORS["border"]
-            )
-            row.grid(row=idx, column=0, sticky="ew", pady=(0, 4))
-            row.grid_columnconfigure(1, weight=1)
-
-            if self._is_target_device(device):
-                selected_var = ctk.BooleanVar(value=(device.ip in self.selected_device_ips))
-                select_cb = ctk.CTkCheckBox(
-                    row,
-                    text="",
-                    variable=selected_var,
-                    width=16,
-                    checkbox_width=16,
-                    checkbox_height=16,
-                    command=lambda ip=device.ip, var=selected_var: self._set_device_selected(ip, bool(var.get()))
-                )
-                select_cb.grid(row=0, column=0, sticky="w", padx=(8, 2), pady=8)
-            else:
-                spacer = ctk.CTkLabel(row, text=" ", width=16)
-                spacer.grid(row=0, column=0, padx=(8, 2), pady=8)
-
-            summary = (
-                f"{self._device_display_name(device)} | "
-                f"{device.ip} | {self._device_status_label(device)}"
-            )
-            label = ctk.CTkLabel(
-                row,
-                text=summary,
-                font=FONTS["small"],
-                text_color=COLORS["text_primary"],
-                anchor="w"
-            )
-            label.grid(row=0, column=1, sticky="w", padx=8, pady=8)
-
-            lag_frame = ctk.CTkFrame(row, fg_color="transparent")
-            lag_frame.grid(row=0, column=2, sticky="e", padx=(4, 6), pady=6)
-            if self._is_target_device(device):
-                lag_var = ctk.IntVar(value=self._get_lag_percent(device.ip))
-                lag_slider = ctk.CTkSlider(
-                    lag_frame,
-                    from_=0,
-                    to=100,
-                    number_of_steps=100,
-                    width=90,
-                    button_color=COLORS["accent_danger"],
-                    progress_color=COLORS["accent_danger"],
-                    button_hover_color=COLORS["accent_danger_hover"],
-                    command=lambda value, ip=device.ip, var=lag_var, label_ref=None: None
-                )
-                lag_value = ctk.CTkLabel(
-                    lag_frame,
-                    text=f"{lag_var.get()}%",
-                    font=FONTS["tiny"],
-                    text_color=COLORS["text_secondary"],
-                    width=30
-                )
-
-                def on_lag_change(value, ip=device.ip, var=lag_var, label_ref=lag_value):
-                    lag_percent = max(0, min(100, int(round(float(value)))))
-                    var.set(lag_percent)
-                    label_ref.configure(text=f"{lag_percent}%")
-                    self._set_lag_percent(ip, lag_percent)
-
-                lag_slider.configure(command=on_lag_change)
-                lag_slider.set(lag_var.get())
-                lag_slider.pack(side="left", padx=(0, 4))
-                lag_value.pack(side="left")
-            else:
-                lag_na = ctk.CTkLabel(
-                    lag_frame,
-                    text="-",
-                    font=FONTS["small"],
-                    text_color=COLORS["text_muted"]
-                )
-                lag_na.pack()
-
-            action_frame = ctk.CTkFrame(row, fg_color="transparent")
-            action_frame.grid(row=0, column=3, sticky="e", padx=(0, 10), pady=6)
-            self._create_action_widget(action_frame, device)
-
     def _configure_list_columns(self, frame: ctk.CTkFrame):
-        frame.grid_columnconfigure(0, weight=1)
-        frame.grid_columnconfigure(1, weight=3)
-        frame.grid_columnconfigure(2, weight=2)
-        frame.grid_columnconfigure(3, weight=3)
-        frame.grid_columnconfigure(4, weight=2)
-        frame.grid_columnconfigure(5, weight=3)
-        frame.grid_columnconfigure(6, weight=2)
-        frame.grid_columnconfigure(7, weight=2)
+        for col, minsize in self.list_column_minsize.items():
+            weight = 1 if col in (1, 5) else 0
+            frame.grid_columnconfigure(col, weight=weight, minsize=minsize)
 
     def _populate_list_row(self, row: ctk.CTkFrame, device: NetworkDevice):
         if self._is_target_device(device):
@@ -1100,7 +974,8 @@ class WiFiThrottlerApp(ctk.CTk):
                 row,
                 text="-",
                 font=FONTS["small"],
-                text_color=COLORS["text_muted"]
+                text_color=COLORS["text_muted"],
+                width=self.list_label_widths.get(0, 28)
             )
             protected.grid(row=0, column=0, sticky="w", padx=8, pady=8)
 
@@ -1124,7 +999,8 @@ class WiFiThrottlerApp(ctk.CTk):
                 text=value,
                 font=fonts[idx - 1],
                 text_color=colors[idx - 1],
-                anchor="w"
+                anchor="w",
+                width=self.list_label_widths.get(idx, 100)
             )
             label.grid(row=0, column=idx, sticky="w", padx=8, pady=8)
 

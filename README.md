@@ -44,7 +44,11 @@ Whether you need to limit bandwidth-hogging devices or manage network access on 
 ## 🖼️ Screenshots
 
 <p align="center">
-  <em>Coming soon — Run the application to see the modern dark-themed interface in action.</em>
+  <img src="docs/screenshots/gui-main-list.png" alt="Zee-Cut GUI Main List View" width="100%"/>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/gui-main-list-alt.png" alt="Zee-Cut GUI Alternate List View" width="100%"/>
 </p>
 
 ---
@@ -236,3 +240,4 @@ This project is licensed under the **MIT License** — see the [LICENSE](LICENSE
 <p align="center">
   <strong>Built with ❤️ by <a href="https://github.com/ifauzeee">ifauzeee</a></strong>
 </p>
+
