@@ -620,12 +620,11 @@ class WiFiThrottlerApp(ctk.CTk):
 
         lag_percent = self._get_lag_percent(ip)
         if lag_percent <= 0:
-            if device.is_throttled:
-                threading.Thread(
-                    target=self.engine.restore_device,
-                    args=(ip,),
-                    daemon=True
-                ).start()
+            threading.Thread(
+                target=self.engine.restore_device,
+                args=(ip,),
+                daemon=True
+            ).start()
             return
 
         level = self._lag_percent_to_level(lag_percent)

@@ -55,7 +55,14 @@ def main():
 
     from gui import WiFiThrottlerApp
     app = WiFiThrottlerApp()
-    app.mainloop()
+    try:
+        app.mainloop()
+    except KeyboardInterrupt:
+        # Graceful exit when user stops from terminal (Ctrl+C)
+        try:
+            app.destroy()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

@@ -224,6 +224,22 @@ class NetworkEngine:
             self._notify_status("Scanning network (multi-method)...")
             started_at = time.time()
             try:
+                previous_devices = list(self.devices.values())
+                previous_target_count = len([
+                    d for d in previous_devices
+                    if not d.is_self and not d.is_gateway
+                ])
+                previous_throttle_levels = {
+                    ip: self.devices[ip].throttle_level
+                    for ip in self._throttle_threads
+                    if ip in self.devices
+                }
+
+                # Start each scan from a clean device list.
+                # Do NOT flush ARP cache automatically because it can reduce
+                # discovery accuracy for quiet/sleeping clients.
+                self.devices.clear()
+
                 # Method 1: ARP table from Windows (most reliable)
                 self._notify_status("Step 1/3: Reading ARP table...")
                 self._scan_arp_table()
@@ -241,13 +257,45 @@ class NetworkEngine:
                     d for d in self.devices.values()
                     if not d.is_self and not d.is_gateway
                 ])
-                if not fast_mode or discovered_targets < 2:
+                self._logger.info(
+                    "Scan quick pass targets=%s previous_targets=%s fast_mode=%s",
+                    discovered_targets,
+                    previous_target_count,
+                    fast_mode
+                )
+                expected_min_targets = 2
+                if previous_target_count > 0:
+                    expected_min_targets = max(2, int(previous_target_count * 0.6))
+
+                if not fast_mode or discovered_targets < expected_min_targets:
                     self._notify_status("Step 3/3: Ping sweep fallback...")
-                    self._ping_sweep(timeout_ms=250, workers=64)
+                    self._ping_sweep(timeout_ms=350, workers=48)
                     self._scan_arp_table()
+                    if SCAPY_AVAILABLE:
+                        self._scan_scapy_arp(timeout=2, retry=1)
 
                 # Resolve gateway MAC
                 self._resolve_gateway_mac()
+
+                # Ensure self and gateway still exist in list even if they don't answer scan.
+                self._add_or_update_device(self.interface.ip, self.interface.mac)
+                self.devices[self.interface.ip].is_self = True
+                if self.interface.gateway_ip and self.interface.gateway_mac:
+                    self._add_or_update_device(self.interface.gateway_ip, self.interface.gateway_mac)
+                    self.devices[self.interface.gateway_ip].is_gateway = True
+
+                # Restore UI throttled state for active throttles.
+                for ip, level in previous_throttle_levels.items():
+                    if ip in self.devices and ip in self._throttle_threads:
+                        self.devices[ip].is_throttled = True
+                        self.devices[ip].throttle_level = level
+
+                # Stop throttle threads for stale/offline IPs.
+                active_ips = set(self.devices.keys())
+                for ip in list(self._throttle_threads.keys()):
+                    if ip not in active_ips:
+                        self._logger.info("Stopping orphan throttle for stale ip=%s", ip)
+                        self.restore_device(ip)
 
                 device_count = len([d for d in self.devices.values()
                                    if not d.is_self and not d.is_gateway])
@@ -300,8 +348,8 @@ class NetworkEngine:
                     if not ip.startswith(subnet_prefix):
                         continue
 
-                    # Only dynamic entries (real devices)
-                    if entry_type != 'dynamic' and entry_type != 'dinamis':
+                    # Keep dynamic and static entries to improve detection accuracy.
+                    if entry_type not in ('dynamic', 'dinamis', 'static', 'statis'):
                         continue
 
                     self._add_or_update_device(ip, mac)
@@ -563,7 +611,7 @@ class NetworkEngine:
         self._throttle_stop_events[ip] = stop_event
 
         def _spoof_loop():
-            self._notify_status(f"⚡ Throttling {ip} (level: {100 - level}%)")
+            self._notify_status(f"Throttling {ip} (level: {100 - level}%)")
             gateway_ip = self.interface.gateway_ip
             target_mac = device.mac
             self._logger.info(
@@ -629,27 +677,42 @@ class NetworkEngine:
 
         if ip in self.devices:
             device = self.devices[ip]
-            if device.is_throttled and self.interface:
+
+            if self.interface and not device.is_self and not device.is_gateway:
                 try:
-                    # Send correct ARP to target (gateway IP -> gateway MAC)
-                    self._send_arp_reply(
-                        target_ip=ip,
-                        target_mac=device.mac,
-                        claimed_ip=self.interface.gateway_ip,
-                        claimed_mac=self.interface.gateway_mac,
-                        count=5
-                    )
+                    if not self.interface.gateway_mac:
+                        self._resolve_gateway_mac()
+                    if not self.interface.gateway_mac:
+                        self._scan_arp_table()
+                        self._resolve_gateway_mac()
 
-                    # Send correct ARP to gateway (target IP -> target MAC)
-                    self._send_arp_reply(
-                        target_ip=self.interface.gateway_ip,
-                        target_mac=self.interface.gateway_mac,
-                        claimed_ip=ip,
-                        claimed_mac=device.mac,
-                        count=5
-                    )
+                    if self.interface.gateway_mac:
+                        # Send multiple corrective ARP bursts so recovery is faster.
+                        for _ in range(3):
+                            # Correct ARP to target (gateway IP -> gateway MAC)
+                            self._send_arp_reply(
+                                target_ip=ip,
+                                target_mac=device.mac,
+                                claimed_ip=self.interface.gateway_ip,
+                                claimed_mac=self.interface.gateway_mac,
+                                count=7
+                            )
 
-                    self._notify_status(f"✅ Restored {ip} to normal")
+                            # Correct ARP to gateway (target IP -> target MAC)
+                            self._send_arp_reply(
+                                target_ip=self.interface.gateway_ip,
+                                target_mac=self.interface.gateway_mac,
+                                claimed_ip=ip,
+                                claimed_mac=device.mac,
+                                count=7
+                            )
+                            time.sleep(0.2)
+
+                        self._notify_status(f"Restored {ip} to normal")
+                    else:
+                        self._notify_status(
+                            f"Restore warning for {ip}: gateway MAC not found, recovery may be slower"
+                        )
                 except Exception as e:
                     self._notify_status(f"Restore error for {ip}: {e}")
                     self._logger.exception("Restore error ip=%s", ip)
@@ -720,7 +783,7 @@ class NetworkEngine:
         except Exception:
             pass
 
-    def flush_arp_cache(self) -> tuple[bool, str]:
+    def flush_arp_cache(self, notify: bool = True) -> tuple[bool, str]:
         """Flush Windows ARP cache (requires admin rights)."""
         commands = [
             ["cmd", "/c", "arp -d *"],
@@ -738,11 +801,18 @@ class NetworkEngine:
                 )
                 if result.returncode == 0:
                     message = "ARP cache flushed."
-                    self._notify_status(message)
+                    if notify:
+                        self._notify_status(message)
+                    else:
+                        self._logger.info(message)
                     return True, message
             except Exception:
                 continue
 
         message = "Failed to flush ARP cache. Run app as Administrator."
-        self._notify_status(message)
+        if notify:
+            self._notify_status(message)
+        else:
+            self._logger.warning(message)
         return False, message
+
