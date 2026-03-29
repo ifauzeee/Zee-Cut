@@ -3,18 +3,22 @@ Zee-Cut - Modern GUI Application
 Advanced WiFi Network Device Controller.
 """
 
-import customtkinter as ctk
-from tkinter import messagebox
+import json
+import os
+import sys
 import threading
 import time
-import sys
-import os
 import webbrowser
+from datetime import datetime
+from pathlib import Path
+from tkinter import filedialog, messagebox
+
+import customtkinter as ctk
 
 from core.admin import is_admin
 from core.models import NetworkDevice
 from core.network import NetworkEngine
-from ui.theme import THEMES, COLORS, FONTS
+from ui.theme import COLORS, FONTS, THEMES
 
 # ─── Theme Configuration ───────────────────────────────────────────────────────
 
@@ -37,6 +41,14 @@ class WiFiThrottlerApp(ctk.CTk):
         }
         self.theme_var = ctk.StringVar(value="AMOLED Black")
         self.filter_mode_var = ctk.StringVar(value="All Devices")
+        self.custom_protected_ips: set[str] = set()
+        self.lag_presets: dict[str, int] = {
+            "Normal (0%)": 0,
+            "Gaming (35%)": 35,
+            "Meeting (60%)": 60,
+            "Block (100%)": 100,
+        }
+        self.lag_preset_var = ctk.StringVar(value="Meeting (60%)")
         self.device_lag_percents: dict[str, int] = {}
         self.selected_target_ips: set[str] = set()
         self.bulk_lag_percent = 100
@@ -261,6 +273,20 @@ class WiFiThrottlerApp(ctk.CTk):
         )
         self.flush_arp_btn.pack(side="left", padx=(0, 8))
 
+        self.export_diag_btn = ctk.CTkButton(
+            right_toolbar,
+            text="Export Diagnostics",
+            font=FONTS["small"],
+            fg_color=COLORS["bg_input"],
+            hover_color=COLORS["bg_card_hover"],
+            text_color=COLORS["text_primary"],
+            corner_radius=8,
+            width=148,
+            height=38,
+            command=self._export_diagnostics
+        )
+        self.export_diag_btn.pack(side="left", padx=(0, 8))
+
         # Scan button
         self.scan_btn = ctk.CTkButton(
             right_toolbar,
@@ -302,6 +328,7 @@ class WiFiThrottlerApp(ctk.CTk):
         )
         self.selection_controls.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         self.selection_controls.grid_columnconfigure(0, weight=1)
+        self.selection_controls.grid_columnconfigure(1, weight=0)
 
         selection_left = ctk.CTkFrame(self.selection_controls, fg_color="transparent")
         selection_left.grid(row=0, column=0, padx=10, pady=8, sticky="w")
@@ -334,13 +361,49 @@ class WiFiThrottlerApp(ctk.CTk):
         )
         self.clear_select_btn.pack(side="left", padx=(0, 10))
 
+        self.protect_selected_btn = ctk.CTkButton(
+            selection_left,
+            text="Protect Selected",
+            font=FONTS["small"],
+            fg_color=COLORS["bg_input"],
+            hover_color=COLORS["bg_card_hover"],
+            text_color=COLORS["text_primary"],
+            corner_radius=8,
+            width=128,
+            height=30,
+            command=self._protect_selected_targets
+        )
+        self.protect_selected_btn.pack(side="left", padx=(0, 8))
+
+        self.clear_safe_list_btn = ctk.CTkButton(
+            selection_left,
+            text="Clear Safe List",
+            font=FONTS["small"],
+            fg_color=COLORS["bg_input"],
+            hover_color=COLORS["bg_card_hover"],
+            text_color=COLORS["text_primary"],
+            corner_radius=8,
+            width=120,
+            height=30,
+            command=self._clear_custom_safe_list
+        )
+        self.clear_safe_list_btn.pack(side="left", padx=(0, 10))
+
         self.selected_count_label = ctk.CTkLabel(
             selection_left,
             text="Selected: 0",
             font=FONTS["small"],
             text_color=COLORS["text_secondary"]
         )
-        self.selected_count_label.pack(side="left")
+        self.selected_count_label.pack(side="left", padx=(0, 10))
+
+        self.safe_count_label = ctk.CTkLabel(
+            selection_left,
+            text="Safe: 0",
+            font=FONTS["small"],
+            text_color=COLORS["text_secondary"]
+        )
+        self.safe_count_label.pack(side="left")
 
         self.bulk_speed_frame = ctk.CTkFrame(self.selection_controls, fg_color="transparent")
         self.bulk_speed_frame.grid(row=0, column=1, padx=10, pady=8, sticky="e")
@@ -375,6 +438,43 @@ class WiFiThrottlerApp(ctk.CTk):
             width=36
         )
         self.bulk_speed_value_label.pack(side="left", padx=(0, 8))
+
+        self.preset_label = ctk.CTkLabel(
+            self.bulk_speed_frame,
+            text="Preset",
+            font=FONTS["small"],
+            text_color=COLORS["text_secondary"]
+        )
+        self.preset_label.pack(side="left", padx=(4, 6))
+
+        self.lag_preset_dropdown = ctk.CTkOptionMenu(
+            self.bulk_speed_frame,
+            variable=self.lag_preset_var,
+            values=list(self.lag_presets.keys()),
+            font=FONTS["small"],
+            fg_color=COLORS["bg_input"],
+            button_color=COLORS["accent_primary"],
+            button_hover_color=COLORS["accent_primary_hover"],
+            dropdown_fg_color=COLORS["bg_card"],
+            dropdown_hover_color=COLORS["bg_card_hover"],
+            corner_radius=8,
+            width=130,
+        )
+        self.lag_preset_dropdown.pack(side="left", padx=(0, 6))
+
+        self.apply_preset_btn = ctk.CTkButton(
+            self.bulk_speed_frame,
+            text="Apply Preset",
+            font=FONTS["small"],
+            fg_color=COLORS["accent_warning"],
+            hover_color=COLORS["accent_warning_hover"],
+            text_color=COLORS["text_primary"],
+            corner_radius=8,
+            width=110,
+            height=30,
+            command=self._apply_preset_to_selected
+        )
+        self.apply_preset_btn.pack(side="left", padx=(0, 6))
 
         self.apply_selected_btn = ctk.CTkButton(
             self.bulk_speed_frame,
@@ -581,6 +681,7 @@ class WiFiThrottlerApp(ctk.CTk):
             "iface_dropdown",
             "filter_mode_dropdown",
             "theme_dropdown",
+            "lag_preset_dropdown",
         ]
         for name in option_menus:
             if hasattr(self, name):
@@ -603,6 +704,12 @@ class WiFiThrottlerApp(ctk.CTk):
                 hover_color=COLORS["bg_card_hover"],
                 text_color=COLORS["text_primary"]
             )
+        if hasattr(self, "export_diag_btn"):
+            self.export_diag_btn.configure(
+                fg_color=COLORS["bg_input"],
+                hover_color=COLORS["bg_card_hover"],
+                text_color=COLORS["text_primary"]
+            )
         if hasattr(self, "selection_controls"):
             self.selection_controls.configure(
                 fg_color=COLORS["bg_card"],
@@ -620,10 +727,26 @@ class WiFiThrottlerApp(ctk.CTk):
                 hover_color=COLORS["bg_card_hover"],
                 text_color=COLORS["text_primary"]
             )
+        if hasattr(self, "protect_selected_btn"):
+            self.protect_selected_btn.configure(
+                fg_color=COLORS["bg_input"],
+                hover_color=COLORS["bg_card_hover"],
+                text_color=COLORS["text_primary"]
+            )
+        if hasattr(self, "clear_safe_list_btn"):
+            self.clear_safe_list_btn.configure(
+                fg_color=COLORS["bg_input"],
+                hover_color=COLORS["bg_card_hover"],
+                text_color=COLORS["text_primary"]
+            )
         if hasattr(self, "selected_count_label"):
             self.selected_count_label.configure(text_color=COLORS["text_secondary"])
+        if hasattr(self, "safe_count_label"):
+            self.safe_count_label.configure(text_color=COLORS["text_secondary"])
         if hasattr(self, "bulk_speed_label"):
             self.bulk_speed_label.configure(text_color=COLORS["text_secondary"])
+        if hasattr(self, "preset_label"):
+            self.preset_label.configure(text_color=COLORS["text_secondary"])
         if hasattr(self, "bulk_speed_value_label"):
             self.bulk_speed_value_label.configure(text_color=COLORS["text_secondary"])
         if hasattr(self, "bulk_speed_slider"):
@@ -631,6 +754,12 @@ class WiFiThrottlerApp(ctk.CTk):
                 button_color=COLORS["accent_danger"],
                 progress_color=COLORS["accent_danger"],
                 button_hover_color=COLORS["accent_danger_hover"]
+            )
+        if hasattr(self, "apply_preset_btn"):
+            self.apply_preset_btn.configure(
+                fg_color=COLORS["accent_warning"],
+                hover_color=COLORS["accent_warning_hover"],
+                text_color=COLORS["text_primary"]
             )
         if hasattr(self, "apply_selected_btn"):
             self.apply_selected_btn.configure(
@@ -657,7 +786,13 @@ class WiFiThrottlerApp(ctk.CTk):
             self._refresh_device_list()
 
     def _is_target_device(self, device: NetworkDevice) -> bool:
-        return not device.is_self and not device.is_gateway
+        return not self._is_protected_device(device)
+
+    def _is_custom_protected_ip(self, ip: str) -> bool:
+        return ip in self.custom_protected_ips
+
+    def _is_protected_device(self, device: NetworkDevice) -> bool:
+        return device.is_self or device.is_gateway or self._is_custom_protected_ip(device.ip)
 
     def _lag_percent_to_level(self, lag_percent: int) -> int:
         lag_percent = max(0, min(100, int(lag_percent)))
@@ -698,15 +833,25 @@ class WiFiThrottlerApp(ctk.CTk):
         if not hasattr(self, "selected_count_label"):
             return
 
+        all_ips = {d.ip for d in self.engine.get_devices_snapshot()}
+        safe_custom_count = len(self.custom_protected_ips.intersection(all_ips))
         selected_count = len(self.selected_target_ips)
         target_count = len(target_ips)
         self.selected_count_label.configure(text=f"Selected: {selected_count}/{target_count}")
+        if hasattr(self, "safe_count_label"):
+            self.safe_count_label.configure(text=f"Safe: {safe_custom_count}")
 
         controls_enabled = self._is_admin
         has_targets = target_count > 0 and controls_enabled
         self.check_all_btn.configure(state="normal" if has_targets else "disabled")
         self.clear_select_btn.configure(state="normal" if selected_count > 0 and controls_enabled else "disabled")
+        self.protect_selected_btn.configure(state="normal" if selected_count > 0 and controls_enabled else "disabled")
+        self.clear_safe_list_btn.configure(
+            state="normal" if safe_custom_count > 0 and controls_enabled else "disabled"
+        )
         self.apply_selected_btn.configure(state="normal" if selected_count > 0 and controls_enabled else "disabled")
+        self.apply_preset_btn.configure(state="normal" if selected_count > 0 and controls_enabled else "disabled")
+        self.lag_preset_dropdown.configure(state="normal" if controls_enabled else "disabled")
         self.bulk_speed_slider.configure(state="normal" if selected_count > 0 and controls_enabled else "disabled")
 
         if selected_count > 0 and controls_enabled:
@@ -737,6 +882,31 @@ class WiFiThrottlerApp(ctk.CTk):
         self.selected_target_ips.clear()
         self._refresh_device_list()
 
+    def _protect_selected_targets(self):
+        if not self._require_admin():
+            return
+        if not self.selected_target_ips:
+            return
+
+        protected_ips = list(self.selected_target_ips)
+        self.custom_protected_ips.update(protected_ips)
+        self.selected_target_ips.clear()
+
+        for ip in protected_ips:
+            self.device_lag_percents[ip] = 0
+            threading.Thread(target=self.engine.restore_device, args=(ip,), daemon=True).start()
+
+        self._update_status(f"Protected {len(protected_ips)} device(s) in safe list")
+        self._refresh_device_list()
+
+    def _clear_custom_safe_list(self):
+        if not self._require_admin():
+            return
+        safe_count = len(self.custom_protected_ips)
+        self.custom_protected_ips.clear()
+        self._update_status(f"Cleared safe list ({safe_count} device(s))")
+        self._refresh_device_list()
+
     def _on_bulk_speed_change(self, value):
         self.bulk_lag_percent = max(0, min(100, int(round(float(value)))))
         if hasattr(self, "bulk_speed_value_label"):
@@ -759,6 +929,22 @@ class WiFiThrottlerApp(ctk.CTk):
 
         self._refresh_device_list()
 
+    def _apply_preset_to_selected(self):
+        if not self._require_admin():
+            return
+        if not self.selected_target_ips:
+            return
+
+        preset_name = self.lag_preset_var.get()
+        preset_lag = self.lag_presets.get(preset_name, 0)
+        self.bulk_lag_percent = preset_lag
+        if hasattr(self, "bulk_speed_slider"):
+            self.bulk_speed_slider.set(self.bulk_lag_percent)
+        if hasattr(self, "bulk_speed_value_label"):
+            self.bulk_speed_value_label.configure(text=f"{self.bulk_lag_percent}%")
+
+        self._apply_bulk_speed_to_selected()
+
     def _schedule_lag_apply(self, ip: str):
         previous_job = self.pending_lag_apply_jobs.pop(ip, None)
         if previous_job:
@@ -772,9 +958,9 @@ class WiFiThrottlerApp(ctk.CTk):
         self.last_lag_interaction_ts = time.time()
 
     def _apply_lag_change(self, ip: str):
+        self.pending_lag_apply_jobs.pop(ip, None)
         if not self._require_admin(warn=False):
             return
-        self.pending_lag_apply_jobs.pop(ip, None)
         device = self.engine.get_device_snapshot(ip)
         if not device or not self._is_target_device(device):
             return
@@ -829,6 +1015,43 @@ class WiFiThrottlerApp(ctk.CTk):
             self.after(0, _done)
 
         threading.Thread(target=_run_flush, daemon=True).start()
+
+    def _export_diagnostics(self):
+        """Export runtime diagnostics for debugging/support."""
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        default_name = f"zee-cut-diagnostics-{timestamp}.json"
+        output_path = filedialog.asksaveasfilename(
+            title="Export Diagnostics",
+            defaultextension=".json",
+            initialfile=default_name,
+            filetypes=[("JSON Files", "*.json"), ("All Files", "*.*")],
+        )
+        if not output_path:
+            return
+
+        try:
+            diagnostics = self.engine.get_diagnostics_snapshot()
+            diagnostics["ui"] = {
+                "is_admin": self._is_admin,
+                "filter_mode": self.filter_mode_var.get(),
+                "selected_count": len(self.selected_target_ips),
+                "safe_list_count": len(self.custom_protected_ips),
+                "safe_list_ips": sorted(self.custom_protected_ips),
+                "selected_lag_percent": self.bulk_lag_percent,
+                "selected_preset": self.lag_preset_var.get(),
+            }
+
+            path = Path(output_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(diagnostics, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+            self._update_status(f"Diagnostics exported: {path}")
+            messagebox.showinfo("Export Diagnostics", f"Saved to:\n{path}")
+        except Exception as error:
+            messagebox.showerror("Export Diagnostics", f"Failed to export diagnostics:\n{error}")
 
     def _on_scan_complete(self):
         def _done():
@@ -895,11 +1118,11 @@ class WiFiThrottlerApp(ctk.CTk):
     def _filter_devices(self, devices: list[NetworkDevice]) -> list[NetworkDevice]:
         mode = self.filter_mode_var.get()
         if mode == "Targets Only":
-            return [d for d in devices if not d.is_self and not d.is_gateway]
+            return [d for d in devices if self._is_target_device(d)]
         if mode == "Throttled Only":
             return [d for d in devices if d.is_throttled]
         if mode == "Protected Only":
-            return [d for d in devices if d.is_self or d.is_gateway]
+            return [d for d in devices if self._is_protected_device(d)]
         return devices
 
     def _render_empty_state(self, message: str):
@@ -1090,12 +1313,18 @@ class WiFiThrottlerApp(ctk.CTk):
             return "Self"
         if device.is_gateway:
             return "Gateway"
+        if self._is_custom_protected_ip(device.ip):
+            return "Protected"
         return "Target"
 
     def _device_status_label(self, device: NetworkDevice) -> str:
+        if self._is_custom_protected_ip(device.ip):
+            return "Protected"
         return "Throttled" if device.is_throttled else "Normal"
 
     def _status_color(self, device: NetworkDevice) -> str:
+        if self._is_custom_protected_ip(device.ip):
+            return COLORS["accent_warning"]
         return COLORS["accent_danger"] if device.is_throttled else COLORS["accent_success"]
 
     def _get_row_color(self, device: NetworkDevice) -> str:
@@ -1103,6 +1332,8 @@ class WiFiThrottlerApp(ctk.CTk):
             return COLORS["self_bg"]
         if device.is_gateway:
             return COLORS["gateway_bg"]
+        if self._is_custom_protected_ip(device.ip):
+            return COLORS["bg_input"]
         if device.is_throttled:
             return COLORS["throttled_bg"]
         return COLORS["bg_card"]

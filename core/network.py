@@ -4,30 +4,28 @@ Handles network scanning, ARP spoofing for throttling, and device management.
 Uses multiple scan methods for maximum device detection on Windows.
 """
 
-import threading
-import time
+import json
+import logging
+import re
 import socket
 import struct
-import uuid
 import subprocess
-import re
-import logging
-from pathlib import Path
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from typing import Optional, Callable
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Callable, Optional
 
 try:
-    from scapy.all import (
-        ARP, Ether, srp, sendp, getmacbyip, conf,
-        get_if_list, get_if_addr, get_if_hwaddr, IFACES
-    )
-    from scapy.arch.windows import get_windows_if_list
+    from scapy.all import ARP, IFACES, Ether, conf, getmacbyip, sendp, srp
     SCAPY_AVAILABLE = True
 except ImportError:
     SCAPY_AVAILABLE = False
 
 import psutil
+
 from core.admin import is_admin as check_admin
 from core.models import NetworkDevice, NetworkInterface
 
@@ -51,6 +49,8 @@ class NetworkEngine:
         self._hostname_executor = ThreadPoolExecutor(max_workers=8)
         self._ip_forwarding_original: Optional[int] = None
         self._ip_forwarding_enabled_by_app = False
+        self._scan_sequence = 0
+        self._last_scan_summary: dict = {}
         self.on_devices_updated: Optional[Callable] = None
         self.on_status_changed: Optional[Callable] = None
         self._logger.info("NetworkEngine initialized")
@@ -91,6 +91,27 @@ class NetworkEngine:
         """Return a copy of the active interface, if set."""
         with self._state_lock:
             return replace(self.interface) if self.interface else None
+
+    def get_last_scan_summary(self) -> dict:
+        """Return latest scan summary."""
+        with self._state_lock:
+            return dict(self._last_scan_summary)
+
+    def _next_scan_session_id(self) -> str:
+        """Generate monotonic scan session id."""
+        with self._state_lock:
+            self._scan_sequence += 1
+            sequence = self._scan_sequence
+        return f"scan-{sequence:04d}"
+
+    def _build_scan_log_event(self, event: str, **fields) -> str:
+        """Build structured scan event payload."""
+        payload = {
+            "event": event,
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            **fields,
+        }
+        return json.dumps(payload, separators=(",", ":"))
 
     def get_interfaces(self) -> list[NetworkInterface]:
         """Get all available network interfaces, matching psutil with scapy."""
@@ -222,15 +243,31 @@ class NetworkEngine:
                 return
             interface_ip = self.interface.ip
             interface_mac = self.interface.mac
+            interface_name = self.interface.display_name
+            gateway_ip = self.interface.gateway_ip
 
         if not interface_ip:
             self._notify_status("ERROR: No interface selected!")
             return
 
+        scan_id = self._next_scan_session_id()
+
         def _scan():
             self._notify_status("Scanning network (multi-method)...")
             started_at = time.time()
+            ping_fallback_used = False
             try:
+                self._logger.info(
+                    self._build_scan_log_event(
+                        "scan.start",
+                        scan_id=scan_id,
+                        fast_mode=fast_mode,
+                        interface_ip=interface_ip,
+                        interface_name=interface_name,
+                        gateway_ip=gateway_ip,
+                    )
+                )
+
                 with self._state_lock:
                     previous_devices = list(self.devices.values())
                 previous_target_count = len([
@@ -279,6 +316,7 @@ class NetworkEngine:
                     expected_min_targets = max(2, int(previous_target_count * 0.6))
 
                 if not fast_mode or discovered_targets < expected_min_targets:
+                    ping_fallback_used = True
                     self._notify_status("Step 3/3: Ping sweep fallback...")
                     self._ping_sweep(timeout_ms=350, workers=48)
                     self._scan_arp_table()
@@ -293,13 +331,13 @@ class NetworkEngine:
                 with self._state_lock:
                     if interface_ip in self.devices:
                         self.devices[interface_ip].is_self = True
-                    gateway_ip = self.interface.gateway_ip if self.interface else ""
-                    gateway_mac = self.interface.gateway_mac if self.interface else ""
-                if gateway_ip and gateway_mac:
-                    self._add_or_update_device(gateway_ip, gateway_mac)
+                    gateway_ip_current = self.interface.gateway_ip if self.interface else ""
+                    gateway_mac_current = self.interface.gateway_mac if self.interface else ""
+                if gateway_ip_current and gateway_mac_current:
+                    self._add_or_update_device(gateway_ip_current, gateway_mac_current)
                     with self._state_lock:
-                        if gateway_ip in self.devices:
-                            self.devices[gateway_ip].is_gateway = True
+                        if gateway_ip_current in self.devices:
+                            self.devices[gateway_ip_current].is_gateway = True
 
                 # Restore UI throttled state for active throttles.
                 with self._state_lock:
@@ -321,8 +359,22 @@ class NetworkEngine:
                         d for d in self.devices.values()
                         if not d.is_self and not d.is_gateway
                     ])
+                    throttled_count = sum(1 for d in self.devices.values() if d.is_throttled)
                 elapsed = time.time() - started_at
                 self._notify_status(f"Found {device_count} devices on network ({elapsed:.1f}s)")
+                summary = {
+                    "scan_id": scan_id,
+                    "completed_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    "elapsed_s": round(elapsed, 2),
+                    "device_count": device_count,
+                    "throttled_count": throttled_count,
+                    "fast_mode": fast_mode,
+                    "ping_fallback_used": ping_fallback_used,
+                    "previous_target_count": previous_target_count,
+                }
+                with self._state_lock:
+                    self._last_scan_summary = summary
+                self._logger.info(self._build_scan_log_event("scan.finish", **summary))
 
                 if self.on_devices_updated:
                     self.on_devices_updated()
@@ -331,6 +383,15 @@ class NetworkEngine:
 
             except Exception as e:
                 self._notify_status(f"Scan error: {str(e)}")
+                elapsed = time.time() - started_at
+                self._logger.exception(
+                    self._build_scan_log_event(
+                        "scan.error",
+                        scan_id=scan_id,
+                        elapsed_s=round(elapsed, 2),
+                        error=str(e),
+                    )
+                )
                 if callback:
                     callback()
 
@@ -816,6 +877,45 @@ class NetworkEngine:
             self._hostname_executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             pass
+
+    def get_diagnostics_snapshot(self, log_tail_lines: int = 200) -> dict:
+        """Return diagnostic payload for support/export use."""
+        with self._state_lock:
+            interface = replace(self.interface) if self.interface else None
+            devices = [replace(device) for device in self.devices.values()]
+            throttled_ips = [ip for ip, device in self.devices.items() if device.is_throttled]
+            throttle_thread_count = len(self._throttle_threads)
+            scan_summary = dict(self._last_scan_summary)
+
+        if interface:
+            interface_payload = vars(interface).copy()
+            interface_payload["scapy_iface"] = str(interface_payload.get("scapy_iface", ""))
+        else:
+            interface_payload = None
+
+        payload = {
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "interface": interface_payload,
+            "device_count": len(devices),
+            "throttled_count": len(throttled_ips),
+            "throttled_ips": throttled_ips,
+            "throttle_thread_count": throttle_thread_count,
+            "last_scan_summary": scan_summary,
+            "devices": [vars(device) for device in devices],
+            "log_tail": self._read_log_tail(log_tail_lines),
+        }
+        return payload
+
+    def _read_log_tail(self, lines: int = 200) -> list[str]:
+        """Read tail lines from engine log file."""
+        try:
+            if not self.log_file.exists():
+                return []
+            with self.log_file.open("r", encoding="utf-8", errors="replace") as handle:
+                content = handle.readlines()
+            return [line.rstrip("\n") for line in content[-max(0, lines):]]
+        except Exception:
+            return []
 
     def _notify_status(self, message: str):
         """Send status update."""
