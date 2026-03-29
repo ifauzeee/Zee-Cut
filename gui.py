@@ -716,7 +716,7 @@ class WiFiThrottlerApp(ctk.CTk):
     def _get_lag_percent(self, ip: str) -> int:
         if ip in self.device_lag_percents:
             return max(0, min(100, int(self.device_lag_percents[ip])))
-        device = self.engine.devices.get(ip)
+        device = self.engine.get_device_snapshot(ip)
         if device and device.is_throttled:
             return 100
         return 0
@@ -725,6 +725,7 @@ class WiFiThrottlerApp(ctk.CTk):
         self.device_lag_percents[ip] = max(0, min(100, int(lag_percent)))
 
     def _sync_device_control_state(self, devices: list[NetworkDevice]):
+        device_map = {device.ip: device for device in devices}
         target_ips = {d.ip for d in devices if self._is_target_device(d)}
         self.device_lag_percents = {
             ip: percent for ip, percent in self.device_lag_percents.items()
@@ -739,7 +740,8 @@ class WiFiThrottlerApp(ctk.CTk):
                 self.after_cancel(after_id)
                 self.pending_lag_apply_jobs.pop(ip, None)
         for ip in target_ips:
-            self.device_lag_percents.setdefault(ip, 100 if self.engine.devices[ip].is_throttled else 0)
+            is_throttled = device_map[ip].is_throttled
+            self.device_lag_percents.setdefault(ip, 100 if is_throttled else 0)
         self._update_selection_controls(target_ips)
 
     def _update_selection_controls(self, target_ips: set[str]):
@@ -770,7 +772,7 @@ class WiFiThrottlerApp(ctk.CTk):
 
     def _check_all_targets(self):
         target_ips = {
-            d.ip for d in self.engine.devices.values()
+            d.ip for d in self.engine.get_devices_snapshot()
             if self._is_target_device(d)
         }
         self.selected_target_ips = set(target_ips)
@@ -792,7 +794,7 @@ class WiFiThrottlerApp(ctk.CTk):
         self._mark_lag_interaction()
         selected_ips = list(self.selected_target_ips)
         for ip in selected_ips:
-            device = self.engine.devices.get(ip)
+            device = self.engine.get_device_snapshot(ip)
             if not device or not self._is_target_device(device):
                 continue
             self._set_lag_percent(ip, self.bulk_lag_percent)
@@ -814,7 +816,7 @@ class WiFiThrottlerApp(ctk.CTk):
 
     def _apply_lag_change(self, ip: str):
         self.pending_lag_apply_jobs.pop(ip, None)
-        device = self.engine.devices.get(ip)
+        device = self.engine.get_device_snapshot(ip)
         if not device or not self._is_target_device(device):
             return
 
@@ -835,7 +837,7 @@ class WiFiThrottlerApp(ctk.CTk):
         ).start()
 
     def _scan_network(self):
-        if not self.engine.interface:
+        if not self.engine.get_interface_snapshot():
             messagebox.showwarning("Warning", "Please select a network interface first.")
             return
 
@@ -887,7 +889,7 @@ class WiFiThrottlerApp(ctk.CTk):
     def _update_status(self, message: str):
         self.status_label.configure(text=message)
 
-        throttled = sum(1 for d in self.engine.devices.values() if d.is_throttled)
+        throttled = self.engine.get_throttled_count()
         self.throttle_count_label.configure(text=f"Throttled: {throttled}")
 
     def _refresh_device_list(self):
@@ -898,7 +900,7 @@ class WiFiThrottlerApp(ctk.CTk):
             widget.destroy()
 
         all_devices = sorted(
-            self.engine.devices.values(),
+            self.engine.get_devices_snapshot(),
             key=lambda d: (
                 not d.is_self,
                 not d.is_gateway,
