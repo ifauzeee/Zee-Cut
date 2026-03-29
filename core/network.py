@@ -235,7 +235,12 @@ class NetworkEngine:
         else:
             self._notify_status(f"Interface: {interface.display_name} ({interface.ip})")
 
-    def scan_network(self, callback: Optional[Callable] = None, fast_mode: bool = True):
+    def scan_network(
+        self,
+        callback: Optional[Callable] = None,
+        fast_mode: bool = True,
+        flush_before_scan: bool = True,
+    ):
         """Scan devices on the selected network interface."""
         with self._state_lock:
             if not self.interface:
@@ -262,6 +267,7 @@ class NetworkEngine:
                         "scan.start",
                         scan_id=scan_id,
                         fast_mode=fast_mode,
+                        flush_before_scan=flush_before_scan,
                         interface_ip=interface_ip,
                         interface_name=interface_name,
                         gateway_ip=gateway_ip,
@@ -282,24 +288,52 @@ class NetworkEngine:
                     }
 
                 # Start each scan from a clean device list.
-                # Do NOT flush ARP cache automatically because it can reduce
-                # discovery accuracy for quiet/sleeping clients.
+                # Run aggressive realtime mode:
+                # 1) flush ARP cache to remove stale device cache
+                # 2) actively warm ARP with ping sweep
+                # 3) perform multi-pass ARP discovery
+                flush_ok = None
+                if flush_before_scan and self.is_admin():
+                    self._notify_status("Pre-scan: Flushing ARP cache...")
+                    flush_ok, _ = self.flush_arp_cache(notify=False)
+                    self._logger.info(
+                        self._build_scan_log_event(
+                            "scan.flush_arp",
+                            scan_id=scan_id,
+                            success=bool(flush_ok),
+                        )
+                    )
+
                 with self._state_lock:
                     self.devices.clear()
 
-                # Method 1: ARP table from Windows (most reliable)
-                self._notify_status("Step 1/3: Reading ARP table...")
+                # Method 1: Ping sweep warm-up to force fresh ARP entries.
+                self._notify_status("Step 1/4: Realtime ping warm-up...")
+                if fast_mode:
+                    self._ping_sweep(timeout_ms=280, workers=72)
+                else:
+                    self._ping_sweep(timeout_ms=320, workers=96)
+
+                # Method 2: ARP table from Windows (fresh after warm-up)
+                self._notify_status("Step 2/4: Reading ARP table...")
                 self._scan_arp_table()
 
-                # Method 2: Scapy ARP broadcast (fast first)
+                # Method 3: Scapy ARP broadcast (active layer-2 discovery)
                 if SCAPY_AVAILABLE:
-                    self._notify_status("Step 2/3: ARP scan (scapy)...")
+                    self._notify_status("Step 3/4: ARP scan (scapy)...")
                     if fast_mode:
                         self._scan_scapy_arp(timeout=2, retry=1)
                     else:
                         self._scan_scapy_arp(timeout=4, retry=2)
 
-                # Method 3: Ping sweep fallback when quick discovery is too low
+                # Method 4: Final refresh pass to catch slow/late responders.
+                self._notify_status("Step 4/4: Final refresh pass...")
+                self._ping_sweep(timeout_ms=260, workers=72)
+                self._scan_arp_table()
+                if SCAPY_AVAILABLE:
+                    self._scan_scapy_arp(timeout=2, retry=1)
+
+                # Optional fallback when quick discovery is still too low.
                 with self._state_lock:
                     discovered_targets = len([
                         d for d in self.devices.values()
@@ -317,11 +351,11 @@ class NetworkEngine:
 
                 if not fast_mode or discovered_targets < expected_min_targets:
                     ping_fallback_used = True
-                    self._notify_status("Step 3/3: Ping sweep fallback...")
-                    self._ping_sweep(timeout_ms=350, workers=48)
+                    self._notify_status("Fallback: extended active discovery...")
+                    self._ping_sweep(timeout_ms=360, workers=96)
                     self._scan_arp_table()
                     if SCAPY_AVAILABLE:
-                        self._scan_scapy_arp(timeout=2, retry=1)
+                        self._scan_scapy_arp(timeout=3, retry=2)
 
                 # Resolve gateway MAC
                 self._resolve_gateway_mac()
@@ -369,11 +403,24 @@ class NetworkEngine:
                     "device_count": device_count,
                     "throttled_count": throttled_count,
                     "fast_mode": fast_mode,
+                    "flush_before_scan": flush_before_scan,
+                    "flush_success": bool(flush_ok) if flush_ok is not None else None,
                     "ping_fallback_used": ping_fallback_used,
                     "previous_target_count": previous_target_count,
                 }
                 with self._state_lock:
                     self._last_scan_summary = summary
+
+                with self._hostname_lock:
+                    active_ips = set(self.devices.keys())
+                    stale_hostnames = [ip for ip in self._hostname_cache if ip not in active_ips]
+                    for ip in stale_hostnames:
+                        self._hostname_cache.pop(ip, None)
+                    for ip in stale_hostnames:
+                        future = self._hostname_futures.pop(ip, None)
+                        if future and not future.done():
+                            future.cancel()
+
                 self._logger.info(self._build_scan_log_event("scan.finish", **summary))
 
                 if self.on_devices_updated:

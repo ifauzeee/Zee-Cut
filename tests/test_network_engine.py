@@ -118,7 +118,9 @@ Interface: 192.168.1.10 --- 0x7
 
         with patch.object(self.engine, "_scan_arp_table"), patch.object(
             self.engine, "_scan_scapy_arp"
-        ), patch.object(self.engine, "_resolve_gateway_mac"):
+        ), patch.object(self.engine, "_resolve_gateway_mac"), patch.object(
+            self.engine, "_ping_sweep"
+        ), patch.object(self.engine, "flush_arp_cache", return_value=(True, "ok")):
             self.engine.scan_network(callback=scan_done.set, fast_mode=True)
             self.assertTrue(scan_done.wait(timeout=5))
 

@@ -989,8 +989,12 @@ class WiFiThrottlerApp(ctk.CTk):
             return
 
         self.scan_in_progress = True
-        self.scan_btn.configure(state="disabled", text="Scanning...")
-        self.engine.scan_network(callback=self._on_scan_complete)
+        self.scan_btn.configure(state="disabled", text="Scanning (Realtime)...")
+        self.engine.scan_network(
+            callback=self._on_scan_complete,
+            fast_mode=False,
+            flush_before_scan=True,
+        )
 
     def _flush_arp_admin(self):
         if not self._is_admin:
