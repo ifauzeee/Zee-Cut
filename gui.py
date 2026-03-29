@@ -11,82 +11,14 @@ import sys
 import os
 import webbrowser
 
-from core.network import NetworkEngine, NetworkDevice
+from core.models import NetworkDevice
+from core.network import NetworkEngine
+from ui.theme import THEMES, COLORS, FONTS
 
 # ─── Theme Configuration ───────────────────────────────────────────────────────
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
-
-# Theme palettes
-THEMES = {
-    "amoled": {
-        "bg_dark": "#000000",
-        "bg_card": "#050505",
-        "bg_card_hover": "#111111",
-        "bg_input": "#0f0f10",
-        "accent_primary": "#3b82f6",
-        "accent_primary_hover": "#60a5fa",
-        "accent_danger": "#ef4444",
-        "accent_danger_hover": "#f87171",
-        "accent_success": "#10b981",
-        "accent_success_hover": "#34d399",
-        "accent_warning": "#f59e0b",
-        "accent_warning_hover": "#fbbf24",
-        "text_primary": "#f8fafc",
-        "text_secondary": "#cbd5e1",
-        "text_muted": "#94a3b8",
-        "border": "#171717",
-        "border_light": "#262626",
-        "gradient_start": "#3b82f6",
-        "gradient_end": "#0ea5e9",
-        "throttled_bg": "#1a0909",
-        "normal_bg": "#050505",
-        "self_bg": "#071223",
-        "gateway_bg": "#07190f",
-    },
-    "google": {
-        "bg_dark": "#202124",
-        "bg_card": "#2d2f31",
-        "bg_card_hover": "#383b3d",
-        "bg_input": "#3c4043",
-        "accent_primary": "#8ab4f8",
-        "accent_primary_hover": "#a8c7fa",
-        "accent_danger": "#f28b82",
-        "accent_danger_hover": "#f6aea9",
-        "accent_success": "#81c995",
-        "accent_success_hover": "#9fd8ad",
-        "accent_warning": "#fdd663",
-        "accent_warning_hover": "#fde293",
-        "text_primary": "#e8eaed",
-        "text_secondary": "#c7c9cc",
-        "text_muted": "#9aa0a6",
-        "border": "#444746",
-        "border_light": "#5f6368",
-        "gradient_start": "#8ab4f8",
-        "gradient_end": "#81c995",
-        "throttled_bg": "#3a1f1f",
-        "normal_bg": "#2d2f31",
-        "self_bg": "#1f2f44",
-        "gateway_bg": "#1f3728",
-    },
-}
-
-COLORS = THEMES["amoled"].copy()
-
-FONTS = {
-    "title": ("Segoe UI", 24, "bold"),
-    "subtitle": ("Segoe UI", 16, "bold"),
-    "heading": ("Segoe UI", 14, "bold"),
-    "body": ("Segoe UI", 13),
-    "body_bold": ("Segoe UI", 13, "bold"),
-    "small": ("Segoe UI", 11),
-    "tiny": ("Segoe UI", 10),
-    "mono": ("Cascadia Code", 12),
-    "mono_small": ("Cascadia Code", 11),
-    "icon": ("Segoe UI Emoji", 16),
-    "icon_large": ("Segoe UI Emoji", 22),
-}
 
 
 class WiFiThrottlerApp(ctk.CTk):

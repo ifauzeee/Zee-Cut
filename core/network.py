@@ -14,7 +14,7 @@ import re
 import logging
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import Optional, Callable
 
 try:
@@ -28,33 +28,8 @@ except ImportError:
     SCAPY_AVAILABLE = False
 
 import psutil
-
-
-@dataclass
-class NetworkDevice:
-    """Represents a device found on the network."""
-    ip: str
-    mac: str
-    hostname: str = "Unknown"
-    vendor: str = "Unknown"
-    is_gateway: bool = False
-    is_throttled: bool = False
-    is_self: bool = False
-    last_seen: float = 0.0
-    throttle_level: int = 100  # 0=full block, 50=half, 100=normal
-
-
-@dataclass
-class NetworkInterface:
-    """Represents a network interface on this machine."""
-    name: str
-    display_name: str
-    ip: str
-    mac: str
-    gateway_ip: str = ""
-    gateway_mac: str = ""
-    subnet_mask: str = "255.255.255.0"
-    scapy_iface: object = None  # Store scapy interface reference
+from core.admin import is_admin as check_admin
+from core.models import NetworkDevice, NetworkInterface
 
 
 class NetworkEngine:
@@ -840,11 +815,7 @@ class NetworkEngine:
 
     def is_admin(self) -> bool:
         """Check if running with admin/elevated privileges."""
-        try:
-            import ctypes
-            return ctypes.windll.shell32.IsUserAnAdmin() != 0
-        except Exception:
-            return False
+        return check_admin()
 
     def _read_ip_forwarding_state(self) -> Optional[int]:
         """Read IPEnableRouter registry value (0/1)."""
