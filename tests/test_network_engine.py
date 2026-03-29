@@ -1,4 +1,5 @@
 import unittest
+from threading import Event
 from unittest.mock import patch
 
 from core.models import NetworkDevice, NetworkInterface
@@ -84,6 +85,47 @@ Interface: 192.168.1.10 --- 0x7
         with patch.object(self.engine, "restore_device") as restore_device:
             self.engine.restore_all()
             restore_device.assert_called_once_with("192.168.1.11")
+
+    def test_get_diagnostics_snapshot_serializes_interface(self):
+        self.engine.interface = NetworkInterface(
+            name="Wi-Fi",
+            display_name="Wi-Fi",
+            ip="192.168.1.10",
+            mac="aa:bb:cc:dd:ee:10",
+            scapy_iface=object(),
+        )
+        self.engine.devices["192.168.1.11"] = NetworkDevice(
+            ip="192.168.1.11",
+            mac="aa:bb:cc:dd:ee:11",
+            is_throttled=True,
+        )
+        snapshot = self.engine.get_diagnostics_snapshot(log_tail_lines=1)
+
+        self.assertIn("interface", snapshot)
+        self.assertIsInstance(snapshot["interface"]["scapy_iface"], str)
+        self.assertEqual(snapshot["throttled_count"], 1)
+
+    def test_scan_network_updates_last_scan_summary(self):
+        self.engine.interface = NetworkInterface(
+            name="Wi-Fi",
+            display_name="Wi-Fi",
+            ip="192.168.1.10",
+            mac="aa:bb:cc:dd:ee:10",
+            gateway_ip="192.168.1.1",
+            gateway_mac="aa:bb:cc:dd:ee:01",
+        )
+        scan_done = Event()
+
+        with patch.object(self.engine, "_scan_arp_table"), patch.object(
+            self.engine, "_scan_scapy_arp"
+        ), patch.object(self.engine, "_resolve_gateway_mac"):
+            self.engine.scan_network(callback=scan_done.set, fast_mode=True)
+            self.assertTrue(scan_done.wait(timeout=5))
+
+        summary = self.engine.get_last_scan_summary()
+        self.assertIn("scan_id", summary)
+        self.assertIn("elapsed_s", summary)
+        self.assertIsInstance(summary["device_count"], int)
 
 
 if __name__ == "__main__":
