@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.1.2] - 2026-03-29
+
+### Added
+- Aggressive realtime scan flow with pre-scan ARP flush.
+- Multi-pass discovery sequence (ping warm-up + ARP/scapy refresh).
+- Stale hostname/cache cleanup after each scan cycle.
+
+### Changed
+- Default GUI scan now runs in realtime aggressive mode for better first-scan accuracy.
+- Scan telemetry now records `flush_before_scan` and flush success in summary logs.
+
 ## [0.1.1] - 2026-03-29
 
 ### Added
@@ -16,4 +27,3 @@ All notable changes to this project are documented in this file.
 ### Changed
 - Runtime dependency constraints are now version-bounded in `requirements.txt`.
 - Unit test coverage expanded for scan summary and diagnostics snapshot paths.
-
