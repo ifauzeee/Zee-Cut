@@ -105,17 +105,20 @@ class WiFiThrottlerApp(ctk.CTk):
         self.theme_var = ctk.StringVar(value="AMOLED Black")
         self.filter_mode_var = ctk.StringVar(value="All Devices")
         self.device_lag_percents: dict[str, int] = {}
+        self.selected_target_ips: set[str] = set()
+        self.bulk_lag_percent = 100
         self.pending_lag_apply_jobs: dict[str, str] = {}
         self.lag_apply_delay_ms = 280
         self.last_lag_interaction_ts = 0.0
         self.scan_in_progress = False
         self.list_column_minsize = {
-            0: 320,  # Device
-            1: 180,  # IP
-            2: 250,  # MAC
-            3: 120,  # Type
-            4: 240,  # Lag %
-            5: 160,  # Status
+            0: 70,   # Sel
+            1: 290,  # Device
+            2: 170,  # IP
+            3: 240,  # MAC
+            4: 120,  # Type
+            5: 230,  # Lag %
+            6: 150,  # Status
         }
         self._is_admin = False
         self._apply_theme(self.theme_options[self.theme_var.get()])
@@ -344,7 +347,7 @@ class WiFiThrottlerApp(ctk.CTk):
     def _create_device_list(self):
         container = ctk.CTkFrame(self, fg_color="transparent")
         container.grid(row=2, column=0, sticky="nsew", padx=16, pady=16)
-        container.grid_rowconfigure(1, weight=1)
+        container.grid_rowconfigure(2, weight=1)
         container.grid_columnconfigure(0, weight=1)
 
         # Device count header
@@ -357,6 +360,105 @@ class WiFiThrottlerApp(ctk.CTk):
         )
         self.device_header.grid(row=0, column=0, sticky="w", pady=(0, 12))
 
+        self.selection_controls = ctk.CTkFrame(
+            container,
+            fg_color=COLORS["bg_card"],
+            corner_radius=8,
+            border_width=1,
+            border_color=COLORS["border"]
+        )
+        self.selection_controls.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        self.selection_controls.grid_columnconfigure(0, weight=1)
+
+        selection_left = ctk.CTkFrame(self.selection_controls, fg_color="transparent")
+        selection_left.grid(row=0, column=0, padx=10, pady=8, sticky="w")
+
+        self.check_all_btn = ctk.CTkButton(
+            selection_left,
+            text="Check All",
+            font=FONTS["small"],
+            fg_color=COLORS["bg_input"],
+            hover_color=COLORS["bg_card_hover"],
+            text_color=COLORS["text_primary"],
+            corner_radius=8,
+            width=90,
+            height=30,
+            command=self._check_all_targets
+        )
+        self.check_all_btn.pack(side="left", padx=(0, 8))
+
+        self.clear_select_btn = ctk.CTkButton(
+            selection_left,
+            text="Clear",
+            font=FONTS["small"],
+            fg_color=COLORS["bg_input"],
+            hover_color=COLORS["bg_card_hover"],
+            text_color=COLORS["text_primary"],
+            corner_radius=8,
+            width=82,
+            height=30,
+            command=self._clear_selected_targets
+        )
+        self.clear_select_btn.pack(side="left", padx=(0, 10))
+
+        self.selected_count_label = ctk.CTkLabel(
+            selection_left,
+            text="Selected: 0",
+            font=FONTS["small"],
+            text_color=COLORS["text_secondary"]
+        )
+        self.selected_count_label.pack(side="left")
+
+        self.bulk_speed_frame = ctk.CTkFrame(self.selection_controls, fg_color="transparent")
+        self.bulk_speed_frame.grid(row=0, column=1, padx=10, pady=8, sticky="e")
+
+        self.bulk_speed_label = ctk.CTkLabel(
+            self.bulk_speed_frame,
+            text="Selected Lag",
+            font=FONTS["small"],
+            text_color=COLORS["text_secondary"]
+        )
+        self.bulk_speed_label.pack(side="left", padx=(0, 8))
+
+        self.bulk_speed_slider = ctk.CTkSlider(
+            self.bulk_speed_frame,
+            from_=0,
+            to=100,
+            number_of_steps=100,
+            width=160,
+            button_color=COLORS["accent_danger"],
+            progress_color=COLORS["accent_danger"],
+            button_hover_color=COLORS["accent_danger_hover"],
+            command=self._on_bulk_speed_change
+        )
+        self.bulk_speed_slider.set(self.bulk_lag_percent)
+        self.bulk_speed_slider.pack(side="left", padx=(0, 6))
+
+        self.bulk_speed_value_label = ctk.CTkLabel(
+            self.bulk_speed_frame,
+            text=f"{self.bulk_lag_percent}%",
+            font=FONTS["tiny"],
+            text_color=COLORS["text_secondary"],
+            width=36
+        )
+        self.bulk_speed_value_label.pack(side="left", padx=(0, 8))
+
+        self.apply_selected_btn = ctk.CTkButton(
+            self.bulk_speed_frame,
+            text="Apply Selected",
+            font=FONTS["small"],
+            fg_color=COLORS["accent_danger"],
+            hover_color=COLORS["accent_danger_hover"],
+            text_color=COLORS["text_primary"],
+            corner_radius=8,
+            width=120,
+            height=30,
+            command=self._apply_bulk_speed_to_selected
+        )
+        self.apply_selected_btn.pack(side="left")
+
+        self.bulk_speed_frame.grid_remove()
+
         # Scrollable device list
         self.device_scroll = ctk.CTkScrollableFrame(
             container,
@@ -365,7 +467,7 @@ class WiFiThrottlerApp(ctk.CTk):
             scrollbar_button_color=COLORS["border_light"],
             scrollbar_button_hover_color=COLORS["accent_primary"]
         )
-        self.device_scroll.grid(row=1, column=0, sticky="nsew")
+        self.device_scroll.grid(row=2, column=0, sticky="nsew")
         self.device_scroll.grid_columnconfigure(0, weight=1)
 
         # Empty state
@@ -551,6 +653,41 @@ class WiFiThrottlerApp(ctk.CTk):
                 hover_color=COLORS["bg_card_hover"],
                 text_color=COLORS["text_primary"]
             )
+        if hasattr(self, "selection_controls"):
+            self.selection_controls.configure(
+                fg_color=COLORS["bg_card"],
+                border_color=COLORS["border"]
+            )
+        if hasattr(self, "check_all_btn"):
+            self.check_all_btn.configure(
+                fg_color=COLORS["bg_input"],
+                hover_color=COLORS["bg_card_hover"],
+                text_color=COLORS["text_primary"]
+            )
+        if hasattr(self, "clear_select_btn"):
+            self.clear_select_btn.configure(
+                fg_color=COLORS["bg_input"],
+                hover_color=COLORS["bg_card_hover"],
+                text_color=COLORS["text_primary"]
+            )
+        if hasattr(self, "selected_count_label"):
+            self.selected_count_label.configure(text_color=COLORS["text_secondary"])
+        if hasattr(self, "bulk_speed_label"):
+            self.bulk_speed_label.configure(text_color=COLORS["text_secondary"])
+        if hasattr(self, "bulk_speed_value_label"):
+            self.bulk_speed_value_label.configure(text_color=COLORS["text_secondary"])
+        if hasattr(self, "bulk_speed_slider"):
+            self.bulk_speed_slider.configure(
+                button_color=COLORS["accent_danger"],
+                progress_color=COLORS["accent_danger"],
+                button_hover_color=COLORS["accent_danger_hover"]
+            )
+        if hasattr(self, "apply_selected_btn"):
+            self.apply_selected_btn.configure(
+                fg_color=COLORS["accent_danger"],
+                hover_color=COLORS["accent_danger_hover"],
+                text_color=COLORS["text_primary"]
+            )
 
         if hasattr(self, "device_header"):
             self.device_header.configure(text_color=COLORS["text_primary"])
@@ -593,12 +730,75 @@ class WiFiThrottlerApp(ctk.CTk):
             ip: percent for ip, percent in self.device_lag_percents.items()
             if ip in target_ips
         }
+        self.selected_target_ips = {
+            ip for ip in self.selected_target_ips
+            if ip in target_ips
+        }
         for ip, after_id in list(self.pending_lag_apply_jobs.items()):
             if ip not in target_ips:
                 self.after_cancel(after_id)
                 self.pending_lag_apply_jobs.pop(ip, None)
         for ip in target_ips:
             self.device_lag_percents.setdefault(ip, 100 if self.engine.devices[ip].is_throttled else 0)
+        self._update_selection_controls(target_ips)
+
+    def _update_selection_controls(self, target_ips: set[str]):
+        if not hasattr(self, "selected_count_label"):
+            return
+
+        selected_count = len(self.selected_target_ips)
+        target_count = len(target_ips)
+        self.selected_count_label.configure(text=f"Selected: {selected_count}/{target_count}")
+
+        has_targets = target_count > 0
+        self.check_all_btn.configure(state="normal" if has_targets else "disabled")
+        self.clear_select_btn.configure(state="normal" if selected_count > 0 else "disabled")
+        self.apply_selected_btn.configure(state="normal" if selected_count > 0 else "disabled")
+        self.bulk_speed_slider.configure(state="normal" if selected_count > 0 else "disabled")
+
+        if selected_count > 0:
+            self.bulk_speed_frame.grid(row=0, column=1, padx=10, pady=8, sticky="e")
+        else:
+            self.bulk_speed_frame.grid_remove()
+
+    def _on_row_select_change(self, ip: str, value: int):
+        if value:
+            self.selected_target_ips.add(ip)
+        else:
+            self.selected_target_ips.discard(ip)
+        self._refresh_device_list()
+
+    def _check_all_targets(self):
+        target_ips = {
+            d.ip for d in self.engine.devices.values()
+            if self._is_target_device(d)
+        }
+        self.selected_target_ips = set(target_ips)
+        self._refresh_device_list()
+
+    def _clear_selected_targets(self):
+        self.selected_target_ips.clear()
+        self._refresh_device_list()
+
+    def _on_bulk_speed_change(self, value):
+        self.bulk_lag_percent = max(0, min(100, int(round(float(value)))))
+        if hasattr(self, "bulk_speed_value_label"):
+            self.bulk_speed_value_label.configure(text=f"{self.bulk_lag_percent}%")
+
+    def _apply_bulk_speed_to_selected(self):
+        if not self.selected_target_ips:
+            return
+
+        self._mark_lag_interaction()
+        selected_ips = list(self.selected_target_ips)
+        for ip in selected_ips:
+            device = self.engine.devices.get(ip)
+            if not device or not self._is_target_device(device):
+                continue
+            self._set_lag_percent(ip, self.bulk_lag_percent)
+            self._schedule_lag_apply(ip)
+
+        self._refresh_device_list()
 
     def _schedule_lag_apply(self, ip: str):
         previous_job = self.pending_lag_apply_jobs.pop(ip, None)
@@ -777,7 +977,7 @@ class WiFiThrottlerApp(ctk.CTk):
         header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         self._configure_list_columns(header)
 
-        for idx, title in enumerate(["Device", "IP", "MAC", "Type", "Lag %", "Status"]):
+        for idx, title in enumerate(["Sel", "Device", "IP", "MAC", "Type", "Lag %", "Status"]):
             label = ctk.CTkLabel(
                 header,
                 text=title,
@@ -805,6 +1005,34 @@ class WiFiThrottlerApp(ctk.CTk):
             frame.grid_columnconfigure(col, weight=weight, minsize=minsize)
 
     def _populate_list_row(self, row: ctk.CTkFrame, device: NetworkDevice):
+        if self._is_target_device(device):
+            selected_var = ctk.IntVar(value=1 if device.ip in self.selected_target_ips else 0)
+            select_box = ctk.CTkCheckBox(
+                row,
+                text="",
+                width=18,
+                checkbox_width=18,
+                checkbox_height=18,
+                corner_radius=4,
+                border_width=2,
+                fg_color=COLORS["accent_primary"],
+                hover_color=COLORS["accent_primary_hover"],
+                border_color=COLORS["border_light"],
+                checkmark_color=COLORS["text_primary"],
+                variable=selected_var,
+                command=lambda ip=device.ip, var=selected_var: self._on_row_select_change(ip, var.get())
+            )
+            select_box.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+        else:
+            select_na = ctk.CTkLabel(
+                row,
+                text="-",
+                font=FONTS["small"],
+                text_color=COLORS["text_muted"],
+                anchor="center"
+            )
+            select_na.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+
         values = [
             self._device_display_name(device),
             device.ip,
@@ -827,10 +1055,10 @@ class WiFiThrottlerApp(ctk.CTk):
                 text_color=colors[idx],
                 anchor="center"
             )
-            label.grid(row=0, column=idx, sticky="nsew", padx=8, pady=8)
+            label.grid(row=0, column=idx + 1, sticky="nsew", padx=8, pady=8)
 
         lag_frame = ctk.CTkFrame(row, fg_color="transparent")
-        lag_frame.grid(row=0, column=4, sticky="nsew", padx=8, pady=6)
+        lag_frame.grid(row=0, column=5, sticky="nsew", padx=8, pady=6)
         lag_frame.grid_columnconfigure(0, weight=1)
         lag_frame.grid_columnconfigure(1, weight=1)
         if self._is_target_device(device):
@@ -883,7 +1111,7 @@ class WiFiThrottlerApp(ctk.CTk):
             text_color=self._status_color(device),
             anchor="center"
         )
-        status_label.grid(row=0, column=5, sticky="nsew", padx=8, pady=8)
+        status_label.grid(row=0, column=6, sticky="nsew", padx=8, pady=8)
 
     def _device_display_name(self, device: NetworkDevice) -> str:
         if device.is_self:
