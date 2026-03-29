@@ -73,6 +73,8 @@ class NetworkEngine:
         self._hostname_futures = {}
         self._hostname_lock = threading.Lock()
         self._hostname_executor = ThreadPoolExecutor(max_workers=8)
+        self._ip_forwarding_original: Optional[int] = None
+        self._ip_forwarding_enabled_by_app = False
         self.on_devices_updated: Optional[Callable] = None
         self.on_status_changed: Optional[Callable] = None
         self._logger.info("NetworkEngine initialized")
@@ -750,38 +752,94 @@ class NetworkEngine:
         except Exception:
             return False
 
+    def _read_ip_forwarding_state(self) -> Optional[int]:
+        """Read IPEnableRouter registry value (0/1)."""
+        try:
+            result = subprocess.run(
+                [
+                    "reg", "query",
+                    "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters",
+                    "/v", "IPEnableRouter"
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            if result.returncode != 0:
+                return None
+
+            match = re.search(r"IPEnableRouter\s+REG_DWORD\s+0x([0-9a-fA-F]+)", result.stdout)
+            if not match:
+                return None
+
+            return int(match.group(1), 16)
+        except Exception:
+            return None
+
     def enable_ip_forwarding(self):
         """Enable IP forwarding on Windows."""
         try:
+            current_state = self._read_ip_forwarding_state()
+            self._ip_forwarding_original = current_state
+
+            if current_state == 1:
+                self._ip_forwarding_enabled_by_app = False
+                self._notify_status("IP Forwarding already enabled")
+                return
+
             subprocess.run(
                 ["powershell", "-Command",
                  "Set-NetIPInterface -Forwarding Enabled -ErrorAction SilentlyContinue"],
                 capture_output=True, timeout=10,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
-            subprocess.run(
+            result = subprocess.run(
                 ["reg", "add",
                  "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters",
                  "/v", "IPEnableRouter", "/t", "REG_DWORD", "/d", "1", "/f"],
                 capture_output=True, timeout=10,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
-            self._notify_status("IP Forwarding enabled")
+            self._ip_forwarding_enabled_by_app = (
+                result.returncode == 0 and current_state == 0
+            )
+            if result.returncode == 0:
+                self._notify_status("IP Forwarding enabled")
+            else:
+                self._notify_status("Failed to enable IP Forwarding")
         except Exception as e:
             self._notify_status(f"Failed to enable IP forwarding: {e}")
 
     def disable_ip_forwarding(self):
         """Disable IP forwarding on Windows."""
+        if not self._ip_forwarding_enabled_by_app:
+            self._logger.info(
+                "Skip disabling IP forwarding because app did not enable it."
+            )
+            return
+
         try:
+            target_state = 0 if self._ip_forwarding_original != 1 else 1
             subprocess.run(
-                ["reg", "add",
-                 "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters",
-                 "/v", "IPEnableRouter", "/t", "REG_DWORD", "/d", "0", "/f"],
+                ["powershell", "-Command",
+                 f"Set-NetIPInterface -Forwarding {'Enabled' if target_state == 1 else 'Disabled'} -ErrorAction SilentlyContinue"],
                 capture_output=True, timeout=10,
                 creationflags=subprocess.CREATE_NO_WINDOW
             )
+            subprocess.run(
+                ["reg", "add",
+                 "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters",
+                 "/v", "IPEnableRouter", "/t", "REG_DWORD", "/d", str(target_state), "/f"],
+                capture_output=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            self._notify_status("IP Forwarding restored to previous state")
         except Exception:
             pass
+        finally:
+            self._ip_forwarding_enabled_by_app = False
+            self._ip_forwarding_original = None
 
     def flush_arp_cache(self, notify: bool = True) -> tuple[bool, str]:
         """Flush Windows ARP cache (requires admin rights)."""
