@@ -18,6 +18,7 @@ venv/
 # IDE
 .vscode/
 .idea/
+.ruff_cache/
 
 # OS
 Thumbs.db

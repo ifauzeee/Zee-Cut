@@ -6,8 +6,8 @@ DISCLAIMER: This tool is intended for use ONLY on networks you own and manage.
 Unauthorized use on networks you don't own is illegal.
 """
 
-import sys
 import ctypes
+import sys
 
 from core.admin import is_admin, run_as_admin
 
