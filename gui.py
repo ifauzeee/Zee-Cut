@@ -11,6 +11,7 @@ import sys
 import os
 import webbrowser
 
+from core.admin import is_admin
 from core.models import NetworkDevice
 from core.network import NetworkEngine
 from ui.theme import THEMES, COLORS, FONTS
@@ -457,15 +458,32 @@ class WiFiThrottlerApp(ctk.CTk):
     # ─── Logic ──────────────────────────────────────────────────────────
 
     def _check_admin(self):
-        self._is_admin = self.engine.is_admin()
+        self._is_admin = is_admin()
         self._apply_admin_badge_style()
+        self._apply_admin_permissions()
+        if not self._is_admin:
+            self._show_admin_warning()
+        self._load_interfaces()
+
+    def _apply_admin_permissions(self):
         if hasattr(self, "flush_arp_btn"):
             self.flush_arp_btn.configure(state="normal" if self._is_admin else "disabled")
+        if hasattr(self, "scan_btn"):
+            self.scan_btn.configure(
+                state="normal" if self._is_admin else "disabled",
+                text="Scan Network" if self._is_admin else "Scan Network (Admin)"
+            )
+        if hasattr(self, "status_label") and not self._is_admin:
+            self.status_label.configure(
+                text="Limited mode: run as Administrator to scan/throttle devices."
+            )
+
+    def _require_admin(self, warn: bool = True) -> bool:
         if self._is_admin:
-            self._load_interfaces()
-        else:
+            return True
+        if warn:
             self._show_admin_warning()
-            self._load_interfaces()
+        return False
 
     def _apply_admin_badge_style(self):
         if not hasattr(self, "admin_badge"):
@@ -684,18 +702,21 @@ class WiFiThrottlerApp(ctk.CTk):
         target_count = len(target_ips)
         self.selected_count_label.configure(text=f"Selected: {selected_count}/{target_count}")
 
-        has_targets = target_count > 0
+        controls_enabled = self._is_admin
+        has_targets = target_count > 0 and controls_enabled
         self.check_all_btn.configure(state="normal" if has_targets else "disabled")
-        self.clear_select_btn.configure(state="normal" if selected_count > 0 else "disabled")
-        self.apply_selected_btn.configure(state="normal" if selected_count > 0 else "disabled")
-        self.bulk_speed_slider.configure(state="normal" if selected_count > 0 else "disabled")
+        self.clear_select_btn.configure(state="normal" if selected_count > 0 and controls_enabled else "disabled")
+        self.apply_selected_btn.configure(state="normal" if selected_count > 0 and controls_enabled else "disabled")
+        self.bulk_speed_slider.configure(state="normal" if selected_count > 0 and controls_enabled else "disabled")
 
-        if selected_count > 0:
+        if selected_count > 0 and controls_enabled:
             self.bulk_speed_frame.grid(row=0, column=1, padx=10, pady=8, sticky="e")
         else:
             self.bulk_speed_frame.grid_remove()
 
     def _on_row_select_change(self, ip: str, value: int):
+        if not self._require_admin(warn=False):
+            return
         if value:
             self.selected_target_ips.add(ip)
         else:
@@ -703,6 +724,8 @@ class WiFiThrottlerApp(ctk.CTk):
         self._refresh_device_list()
 
     def _check_all_targets(self):
+        if not self._require_admin():
+            return
         target_ips = {
             d.ip for d in self.engine.get_devices_snapshot()
             if self._is_target_device(d)
@@ -720,6 +743,8 @@ class WiFiThrottlerApp(ctk.CTk):
             self.bulk_speed_value_label.configure(text=f"{self.bulk_lag_percent}%")
 
     def _apply_bulk_speed_to_selected(self):
+        if not self._require_admin():
+            return
         if not self.selected_target_ips:
             return
 
@@ -747,6 +772,8 @@ class WiFiThrottlerApp(ctk.CTk):
         self.last_lag_interaction_ts = time.time()
 
     def _apply_lag_change(self, ip: str):
+        if not self._require_admin(warn=False):
+            return
         self.pending_lag_apply_jobs.pop(ip, None)
         device = self.engine.get_device_snapshot(ip)
         if not device or not self._is_target_device(device):
@@ -769,6 +796,8 @@ class WiFiThrottlerApp(ctk.CTk):
         ).start()
 
     def _scan_network(self):
+        if not self._require_admin():
+            return
         if not self.engine.get_interface_snapshot():
             messagebox.showwarning("Warning", "Please select a network interface first.")
             return
@@ -953,6 +982,7 @@ class WiFiThrottlerApp(ctk.CTk):
                 hover_color=COLORS["accent_primary_hover"],
                 border_color=COLORS["border_light"],
                 checkmark_color=COLORS["text_primary"],
+                state="normal" if self._is_admin else "disabled",
                 variable=selected_var,
                 command=lambda ip=device.ip, var=selected_var: self._on_row_select_change(ip, var.get())
             )
@@ -1003,6 +1033,7 @@ class WiFiThrottlerApp(ctk.CTk):
                 to=100,
                 number_of_steps=100,
                 width=90,
+                state="normal" if self._is_admin else "disabled",
                 button_color=COLORS["accent_danger"],
                 progress_color=COLORS["accent_danger"],
                 button_hover_color=COLORS["accent_danger_hover"],

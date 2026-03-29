@@ -92,6 +92,12 @@ Download `Zee-Cut.exe` from the [Releases](https://github.com/ifauzeee/Zee-Cut/r
 
 > **Note:** Administrator privileges are required for ARP operations. The application will prompt for elevation automatically.
 
+### Running Tests
+
+```bash
+python -m unittest discover -s tests -v
+```
+
 ---
 
 ## 📖 Usage Guide

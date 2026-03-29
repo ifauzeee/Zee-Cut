@@ -353,34 +353,44 @@ class NetworkEngine:
             if result.returncode != 0:
                 return
 
-            for line in result.stdout.split('\n'):
-                line = line.strip()
-                # Parse: 192.168.1.1    aa-bb-cc-dd-ee-ff    dynamic
-                match = re.match(
-                    r'(\d+\.\d+\.\d+\.\d+)\s+([\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2})\s+(\w+)',
-                    line
-                )
-                if match:
-                    ip = match.group(1)
-                    mac = match.group(2).replace('-', ':').lower()
-                    entry_type = match.group(3).lower()
-
-                    # Skip broadcast and multicast
-                    if mac == 'ff:ff:ff:ff:ff:ff':
-                        continue
-                    if ip.endswith('.255'):
-                        continue
-                    if not ip.startswith(subnet_prefix):
-                        continue
-
-                    # Keep dynamic and static entries to improve detection accuracy.
-                    if entry_type not in ('dynamic', 'dinamis', 'static', 'statis'):
-                        continue
-
-                    self._add_or_update_device(ip, mac)
+            for ip, mac in self._parse_arp_table_entries(result.stdout, subnet_prefix):
+                self._add_or_update_device(ip, mac)
 
         except Exception as e:
             self._notify_status(f"ARP table scan error: {e}")
+
+    @staticmethod
+    def _parse_arp_table_entries(arp_output: str, subnet_prefix: str) -> list[tuple[str, str]]:
+        """Parse Windows arp -a output and return (ip, mac) pairs."""
+        entries: list[tuple[str, str]] = []
+        for raw_line in arp_output.splitlines():
+            line = raw_line.strip()
+            match = re.match(
+                r'(\d+\.\d+\.\d+\.\d+)\s+([\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2})\s+(\w+)',
+                line
+            )
+            if not match:
+                continue
+
+            ip = match.group(1)
+            mac = match.group(2).replace('-', ':').lower()
+            entry_type = match.group(3).lower()
+
+            # Skip broadcast and multicast.
+            if mac == "ff:ff:ff:ff:ff:ff":
+                continue
+            if ip.endswith(".255"):
+                continue
+            if not ip.startswith(subnet_prefix):
+                continue
+
+            # Keep dynamic and static entries to improve detection accuracy.
+            if entry_type not in ("dynamic", "dinamis", "static", "statis"):
+                continue
+
+            entries.append((ip, mac))
+
+        return entries
 
     def _ping_sweep(self, timeout_ms: int = 250, workers: int = 64):
         """Fast parallel ping sweep to warm ARP cache."""
