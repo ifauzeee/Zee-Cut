@@ -56,6 +56,9 @@ class WiFiThrottlerApp(ctk.CTk):
         self.lag_apply_delay_ms = 280
         self.last_lag_interaction_ts = 0.0
         self.scan_in_progress = False
+        self._refresh_pending = False
+        self._last_refresh_time = 0.0
+        self._refresh_debounce_ms = 850
         self.list_column_minsize = {
             0: 70,   # Sel
             1: 290,  # Device
@@ -1063,14 +1066,23 @@ class WiFiThrottlerApp(ctk.CTk):
             self.scan_btn.configure(state="normal", text="Scan Network")
             self._refresh_device_list()
         self.after(0, _done)
-
     def _on_devices_updated(self):
-        self.after(0, self._handle_devices_updated_ui)
+        """Handle signal that device data changed (new devices or hostnames)."""
+        if not self._refresh_pending:
+            self._refresh_pending = True
+            self.after(self._refresh_debounce_ms, self._handle_throttled_devices_update)
 
-    def _handle_devices_updated_ui(self):
-        if self.scan_in_progress:
-            self._refresh_device_list()
-
+    def _handle_throttled_devices_update(self):
+        """Throttled UI update to prevent freezing during high-activity scans."""
+        self._refresh_pending = False
+        now = time.time()
+        if now - self._last_refresh_time < (self._refresh_debounce_ms / 1000.0):
+            if not self._refresh_pending:
+                self._refresh_pending = True
+                self.after(200, self._handle_throttled_devices_update)
+            return
+        self._last_refresh_time = now
+        self._refresh_device_list()
     def _on_status_changed(self, message: str):
         self.after(0, lambda: self._update_status(message))
 
@@ -1357,4 +1369,3 @@ class WiFiThrottlerApp(ctk.CTk):
             self.after(0, self.destroy)
 
         threading.Thread(target=_cleanup, daemon=True).start()
-

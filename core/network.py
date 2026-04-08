@@ -518,7 +518,7 @@ class NetworkEngine:
                 except Exception:
                     pass
 
-            with ThreadPoolExecutor(max_workers=workers) as pool:
+            with ThreadPoolExecutor(max_workers=min(workers, 48)) as pool:
                 list(pool.map(ping_ip, ips))
         except Exception:
             pass
