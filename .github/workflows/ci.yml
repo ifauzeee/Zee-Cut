@@ -39,6 +39,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: windows-latest
     needs: [test]
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
