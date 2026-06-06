@@ -28,6 +28,7 @@ import psutil
 
 from core.admin import is_admin as check_admin
 from core.models import NetworkDevice, NetworkInterface
+from core.oui import lookup_vendor
 
 
 class NetworkEngine:
@@ -613,6 +614,7 @@ class NetworkEngine:
             is_self = (ip == self.interface.ip) if self.interface else False
 
         hostname = self._hostname_cache.get(ip, "Unknown")
+        vendor = lookup_vendor(mac)
 
         with self._state_lock:
             if ip in self.devices:
@@ -620,6 +622,8 @@ class NetworkEngine:
                 dev.mac = mac
                 if hostname != "Unknown":
                     dev.hostname = hostname
+                if dev.vendor == "Unknown" and vendor != "Unknown":
+                    dev.vendor = vendor
                 dev.is_gateway = is_gateway
                 dev.is_self = is_self
                 dev.last_seen = time.time()
@@ -628,6 +632,7 @@ class NetworkEngine:
                     ip=ip,
                     mac=mac,
                     hostname=hostname,
+                    vendor=vendor,
                     is_gateway=is_gateway,
                     is_self=is_self,
                     last_seen=time.time()

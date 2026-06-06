@@ -2,6 +2,23 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.0] - 2026-06-06
+
+### Added
+- Bandwidth monitoring per device via scapy sniff — real-time ↑↓ KB/s displayed per row.
+- OUI/Vendor lookup from MAC address — identifies device manufacturer automatically.
+- Persistent session config saved to `%LOCALAPPDATA%/ZeeCut/config.json` (safe list, theme, interface, lag settings, window size).
+- Auto-scan berkala with configurable interval (2/3/5/10 min) using `after()` loop.
+- New device notification via Windows native alert when unknown MAC appears on network.
+- "DL OUI DB" button to download full IEEE OUI database on demand.
+- Bandwidth monitor lifecycle tied to interface selection and scan completion.
+
+### Changed
+- Device list columns reorganized: Vendor (new), Type, Lag %, Status, ↑↓ KB/s (new).
+- Interface selection now restores last-used interface from saved config.
+- Admin permission controls extended to auto-scan toggle and interval dropdown.
+- Theme engine covers all new toolbar elements (auto-scan switch, interval picker, OUI button).
+
 ## [0.1.2] - 2026-03-29
 
 ### Added

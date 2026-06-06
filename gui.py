@@ -12,12 +12,16 @@ import webbrowser
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox
+from typing import Optional
 
 import customtkinter as ctk
 
 from core.admin import is_admin
+from core.bandwidth import BandwidthMonitor
+from core.config import ConfigManager
 from core.models import NetworkDevice
 from core.network import NetworkEngine
+from core.oui import download_oui_database
 from ui.theme import COLORS, FONTS, THEMES
 
 # ─── Theme Configuration ───────────────────────────────────────────────────────
@@ -35,13 +39,18 @@ class WiFiThrottlerApp(ctk.CTk):
         self.engine = NetworkEngine()
         self.engine.on_devices_updated = self._on_devices_updated
         self.engine.on_status_changed = self._on_status_changed
+
+        self.config_mgr = ConfigManager()
+        saved_config = self.config_mgr.load()
+
         self.theme_options = {
             "AMOLED Black": "amoled",
             "Google Dark": "google",
         }
-        self.theme_var = ctk.StringVar(value="AMOLED Black")
+        saved_theme = saved_config.theme if saved_config.theme in self.theme_options else "AMOLED Black"
+        self.theme_var = ctk.StringVar(value=saved_theme)
         self.filter_mode_var = ctk.StringVar(value="All Devices")
-        self.custom_protected_ips: set[str] = set()
+        self.custom_protected_ips: set[str] = set(saved_config.custom_protected_ips)
         self.lag_presets: dict[str, int] = {
             "Normal (0%)": 0,
             "Gaming (35%)": 35,
@@ -49,7 +58,7 @@ class WiFiThrottlerApp(ctk.CTk):
             "Block (100%)": 100,
         }
         self.lag_preset_var = ctk.StringVar(value="Meeting (60%)")
-        self.device_lag_percents: dict[str, int] = {}
+        self.device_lag_percents: dict[str, int] = dict(saved_config.device_lag_percents)
         self.selected_target_ips: set[str] = set()
         self.bulk_lag_percent = 100
         self.pending_lag_apply_jobs: dict[str, str] = {}
@@ -59,27 +68,45 @@ class WiFiThrottlerApp(ctk.CTk):
         self._refresh_pending = False
         self._last_refresh_time = 0.0
         self._refresh_debounce_ms = 850
+        self._saved_interface_name = saved_config.interface_name
+        self._saved_interface_ip = saved_config.interface_ip
+        self._known_device_ips: set[str] = set()
         self.list_column_minsize = {
-            0: 70,   # Sel
-            1: 290,  # Device
-            2: 170,  # IP
-            3: 240,  # MAC
-            4: 120,  # Type
-            5: 230,  # Lag %
-            6: 150,  # Status
+            0: 60,   # Sel
+            1: 200,  # Device
+            2: 150,  # IP
+            3: 190,  # MAC
+            4: 150,  # Vendor
+            5: 90,   # Type
+            6: 160,  # Lag %
+            7: 130,  # Status
+            8: 130,  # ↑↓ KB/s
         }
         self._is_admin = False
+
+        self._bandwidth = BandwidthMonitor()
+
+        self.auto_scan_enabled = ctk.BooleanVar(value=saved_config.auto_scan_enabled)
+        self.auto_scan_interval = saved_config.auto_scan_interval_minutes
+        self._auto_scan_job: Optional[str] = None
+
+        self._new_device_notification_enabled = ctk.BooleanVar(
+            value=saved_config.new_device_notification_enabled
+        )
+
         self._apply_theme(self.theme_options[self.theme_var.get()])
 
-        self._setup_window()
+        self._setup_window(saved_config)
         self._create_layout()
         self._check_admin()
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    def _setup_window(self):
+    def _setup_window(self, saved_config=None):
         self.title("Zee-Cut | Network Control Center")
-        self.geometry("1180x780")
+        w = saved_config.last_window_width if saved_config else 1180
+        h = saved_config.last_window_height if saved_config else 780
+        self.geometry(f"{w}x{h}")
         self.minsize(980, 640)
         self.configure(fg_color=COLORS["bg_dark"])
 
@@ -302,7 +329,52 @@ class WiFiThrottlerApp(ctk.CTk):
             height=38,
             command=self._scan_network
         )
-        self.scan_btn.pack(side="left")
+        self.scan_btn.pack(side="left", padx=(0, 6))
+
+        self.auto_scan_switch = ctk.CTkSwitch(
+            right_toolbar,
+            text="Auto",
+            font=FONTS["small"],
+            variable=self.auto_scan_enabled,
+            onvalue=True,
+            offvalue=False,
+            button_color=COLORS["accent_primary"],
+            progress_color=COLORS["accent_primary"],
+            command=self._on_auto_scan_toggle,
+            width=60,
+        )
+        self.auto_scan_switch.pack(side="left", padx=(0, 4))
+
+        self.auto_scan_interval_dropdown = ctk.CTkOptionMenu(
+            right_toolbar,
+            values=["2 min", "3 min", "5 min", "10 min"],
+            font=FONTS["small"],
+            fg_color=COLORS["bg_input"],
+            button_color=COLORS["accent_primary"],
+            button_hover_color=COLORS["accent_primary_hover"],
+            dropdown_fg_color=COLORS["bg_card"],
+            dropdown_hover_color=COLORS["bg_card_hover"],
+            corner_radius=8,
+            width=72,
+            command=self._on_auto_scan_interval_changed,
+        )
+        interval_label = f"{self.auto_scan_interval} min"
+        self.auto_scan_interval_dropdown.set(interval_label if interval_label in ["2 min", "3 min", "5 min", "10 min"] else "3 min")
+        self.auto_scan_interval_dropdown.pack(side="left", padx=(0, 6))
+
+        self.dl_oui_btn = ctk.CTkButton(
+            right_toolbar,
+            text="DL OUI DB",
+            font=FONTS["tiny"],
+            fg_color=COLORS["bg_input"],
+            hover_color=COLORS["bg_card_hover"],
+            text_color=COLORS["text_muted"],
+            corner_radius=8,
+            width=70,
+            height=30,
+            command=self._download_oui_db,
+        )
+        self.dl_oui_btn.pack(side="left")
 
     # ─── Device List ────────────────────────────────────────────────────
 
@@ -569,14 +641,19 @@ class WiFiThrottlerApp(ctk.CTk):
         self._load_interfaces()
 
     def _apply_admin_permissions(self):
+        is_admin = self._is_admin
         if hasattr(self, "flush_arp_btn"):
-            self.flush_arp_btn.configure(state="normal" if self._is_admin else "disabled")
+            self.flush_arp_btn.configure(state="normal" if is_admin else "disabled")
         if hasattr(self, "scan_btn"):
             self.scan_btn.configure(
-                state="normal" if self._is_admin else "disabled",
-                text="Scan Network" if self._is_admin else "Scan Network (Admin)"
+                state="normal" if is_admin else "disabled",
+                text="Scan Network" if is_admin else "Scan Network (Admin)"
             )
-        if hasattr(self, "status_label") and not self._is_admin:
+        if hasattr(self, "auto_scan_switch"):
+            self.auto_scan_switch.configure(state="normal" if is_admin else "disabled")
+        if hasattr(self, "auto_scan_interval_dropdown"):
+            self.auto_scan_interval_dropdown.configure(state="normal" if is_admin else "disabled")
+        if hasattr(self, "status_label") and not is_admin:
             self.status_label.configure(
                 text="Limited mode: run as Administrator to scan/throttle devices."
             )
@@ -631,13 +708,26 @@ class WiFiThrottlerApp(ctk.CTk):
     def _update_interface_list(self, names: list):
         self.iface_dropdown.configure(values=names)
         if names and names[0] != "No interfaces found":
-            self.iface_var.set(names[0])
-            self._on_interface_selected(names[0])
+            # Try to restore saved interface
+            saved_name = self._saved_interface_name
+            saved_ip = self._saved_interface_ip
+            selected = names[0]
+            for name in names:
+                if saved_name and saved_name in name:
+                    selected = name
+                    break
+                if saved_ip and saved_ip in name:
+                    selected = name
+                    break
+            self.iface_var.set(selected)
+            self._on_interface_selected(selected)
 
     def _on_interface_selected(self, choice: str):
         if choice in self._interfaces:
             iface = self._interfaces[choice]
             self.engine.set_interface(iface)
+            self._bandwidth.stop()
+            self._start_bandwidth_monitor()
             self._update_status(
                 f"Interface: {iface.display_name} | IP: {iface.ip} | Gateway: {iface.gateway_ip}"
             )
@@ -685,6 +775,7 @@ class WiFiThrottlerApp(ctk.CTk):
             "filter_mode_dropdown",
             "theme_dropdown",
             "lag_preset_dropdown",
+            "auto_scan_interval_dropdown",
         ]
         for name in option_menus:
             if hasattr(self, name):
@@ -700,6 +791,17 @@ class WiFiThrottlerApp(ctk.CTk):
             self.scan_btn.configure(
                 fg_color=COLORS["accent_primary"],
                 hover_color=COLORS["accent_primary_hover"]
+            )
+        if hasattr(self, "auto_scan_switch"):
+            self.auto_scan_switch.configure(
+                button_color=COLORS["accent_primary"],
+                progress_color=COLORS["accent_primary"],
+            )
+        if hasattr(self, "dl_oui_btn"):
+            self.dl_oui_btn.configure(
+                fg_color=COLORS["bg_input"],
+                hover_color=COLORS["bg_card_hover"],
+                text_color=COLORS["text_muted"],
             )
         if hasattr(self, "flush_arp_btn"):
             self.flush_arp_btn.configure(
@@ -999,6 +1101,127 @@ class WiFiThrottlerApp(ctk.CTk):
             flush_before_scan=True,
         )
 
+    def _on_auto_scan_toggle(self):
+        if self.auto_scan_enabled.get():
+            self._start_auto_scan()
+        else:
+            self._stop_auto_scan()
+
+    def _on_auto_scan_interval_changed(self, choice: str):
+        try:
+            self.auto_scan_interval = int(choice.split()[0])
+        except (ValueError, IndexError):
+            self.auto_scan_interval = 3
+        if self.auto_scan_enabled.get():
+            self._stop_auto_scan()
+            self._start_auto_scan()
+
+    def _start_auto_scan(self):
+        self._stop_auto_scan()
+        interval_ms = self.auto_scan_interval * 60 * 1000
+        self._auto_scan_job = self.after(interval_ms, self._auto_scan_tick)
+        self._update_status(f"Auto-scan every {self.auto_scan_interval} min enabled")
+
+    def _stop_auto_scan(self):
+        if self._auto_scan_job:
+            self.after_cancel(self._auto_scan_job)
+            self._auto_scan_job = None
+
+    def _auto_scan_tick(self):
+        """Periodic auto-scan callback."""
+        if not self.auto_scan_enabled.get():
+            return
+        if self.scan_in_progress:
+            interval_ms = self.auto_scan_interval * 60 * 1000
+            self._auto_scan_job = self.after(interval_ms, self._auto_scan_tick)
+            return
+        self._scan_network()
+        interval_ms = self.auto_scan_interval * 60 * 1000
+        self._auto_scan_job = self.after(interval_ms, self._auto_scan_tick)
+
+    def _download_oui_db(self):
+        """Download OUI database from IEEE in background."""
+        def _dl():
+            self.after(0, lambda: self.dl_oui_btn.configure(
+                state="disabled", text="Downloading..."
+            ))
+            success = download_oui_database()
+            if success:
+                self.after(0, lambda: self._update_status("OUI database downloaded successfully"))
+                self.after(0, lambda: self._refresh_device_list())
+            else:
+                self.after(0, lambda: self._update_status("OUI download failed (check internet)"))
+            self.after(0, lambda: self.dl_oui_btn.configure(
+                state="normal", text="DL OUI DB"
+            ))
+
+        threading.Thread(target=_dl, daemon=True).start()
+
+    def _start_bandwidth_monitor(self):
+        """Start bandwidth monitoring on the selected interface."""
+        iface = self.engine.get_interface_snapshot()
+        if not iface:
+            return
+        subnet = ".".join(iface.ip.split(".")[:3])
+        self._bandwidth.set_interface(iface.scapy_iface, iface.mac, subnet)
+        if not self._bandwidth.is_running:
+            self._bandwidth.start()
+            self._schedule_bw_refresh()
+
+    def _schedule_bw_refresh(self):
+        """Periodically refresh bandwidth labels every 2 seconds."""
+        if not self._bandwidth.is_running:
+            return
+        self._refresh_bandwidth_labels()
+        self.after(2000, self._schedule_bw_refresh)
+
+    def _refresh_bandwidth_labels(self):
+        """Update bandwidth labels for all visible device rows."""
+        if not hasattr(self, "device_scroll"):
+            return
+        for widget in self.device_scroll.winfo_children():
+            if isinstance(widget, ctk.CTkFrame) and hasattr(widget, "bw_labels"):
+                for mac, label_ref in widget.bw_labels:
+                    try:
+                        self._update_bw_label(label_ref, mac)
+                    except Exception:
+                        pass
+
+    def _update_bw_label(self, label: ctk.CTkLabel, mac: str):
+        """Update a single bandwidth label with current rates."""
+        mac_key = mac.lower().replace("-", ":")
+        rates = self._bandwidth.get_rates(mac_key)
+        up = rates.get("up_kbps", 0.0)
+        down = rates.get("down_kbps", 0.0)
+        if up < 0.01 and down < 0.01:
+            label.configure(text="")
+        else:
+            label.configure(text=f"↑{up:.1f} ↓{down:.1f}")
+
+    def _check_new_device_notification(self, devices: list[NetworkDevice]):
+        """Show notification for newly discovered devices."""
+        current_ips = {d.ip for d in devices if not d.is_self and not d.is_gateway}
+        new_ips = current_ips - self._known_device_ips
+
+        if new_ips and self._new_device_notification_enabled.get():
+            for ip in new_ips:
+                device = next((d for d in devices if d.ip == ip), None)
+                if device:
+                    name = device.vendor if device.vendor != "Unknown" else device.hostname
+                    self._show_notification(
+                        "New Device Detected",
+                        f"{name} ({device.ip}) - {device.mac.upper()}"
+                    )
+        self._known_device_ips = current_ips
+
+    def _show_notification(self, title: str, message: str):
+        """Show Windows native notification."""
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, message, title, 0x00000040 | 0x00001000)
+        except Exception:
+            pass
+
     def _flush_arp_admin(self):
         if not self._is_admin:
             messagebox.showwarning(
@@ -1064,6 +1287,12 @@ class WiFiThrottlerApp(ctk.CTk):
         def _done():
             self.scan_in_progress = False
             self.scan_btn.configure(state="normal", text="Scan Network")
+            devices = self.engine.get_devices_snapshot()
+            if not self._known_device_ips:
+                self._known_device_ips = {d.ip for d in devices if not d.is_self and not d.is_gateway}
+            else:
+                self._check_new_device_notification(devices)
+            self._start_bandwidth_monitor()
             self._refresh_device_list()
         self.after(0, _done)
     def _on_devices_updated(self):
@@ -1179,7 +1408,7 @@ class WiFiThrottlerApp(ctk.CTk):
         header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         self._configure_list_columns(header)
 
-        for idx, title in enumerate(["Sel", "Device", "IP", "MAC", "Type", "Lag %", "Status"]):
+        for idx, title in enumerate(["Sel", "Device", "IP", "MAC", "Vendor", "Type", "Lag %", "Status", "↑↓ KB/s"]):
             label = ctk.CTkLabel(
                 header,
                 text=title,
@@ -1187,7 +1416,7 @@ class WiFiThrottlerApp(ctk.CTk):
                 text_color=COLORS["text_secondary"],
                 anchor="center"
             )
-            label.grid(row=0, column=idx, sticky="nsew", padx=8, pady=8)
+            label.grid(row=0, column=idx, sticky="nsew", padx=6, pady=8)
 
         for idx, device in enumerate(devices, start=1):
             row = ctk.CTkFrame(
@@ -1225,7 +1454,7 @@ class WiFiThrottlerApp(ctk.CTk):
                 variable=selected_var,
                 command=lambda ip=device.ip, var=selected_var: self._on_row_select_change(ip, var.get())
             )
-            select_box.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+            select_box.grid(row=0, column=0, sticky="nsew", padx=6, pady=8)
         else:
             select_na = ctk.CTkLabel(
                 row,
@@ -1234,21 +1463,23 @@ class WiFiThrottlerApp(ctk.CTk):
                 text_color=COLORS["text_muted"],
                 anchor="center"
             )
-            select_na.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
+            select_na.grid(row=0, column=0, sticky="nsew", padx=6, pady=8)
 
         values = [
             self._device_display_name(device),
             device.ip,
             device.mac.upper(),
+            device.vendor if device.vendor != "Unknown" else "",
             self._device_type_label(device),
         ]
         colors = [
             COLORS["text_primary"],
             COLORS["text_secondary"],
             COLORS["text_muted"],
+            COLORS["text_muted"],
             COLORS["text_secondary"],
         ]
-        fonts = [FONTS["small"], FONTS["mono_small"], FONTS["mono_small"], FONTS["small"]]
+        fonts = [FONTS["small"], FONTS["mono_small"], FONTS["mono_small"], FONTS["tiny"], FONTS["small"]]
 
         for idx, value in enumerate(values):
             label = ctk.CTkLabel(
@@ -1258,10 +1489,10 @@ class WiFiThrottlerApp(ctk.CTk):
                 text_color=colors[idx],
                 anchor="center"
             )
-            label.grid(row=0, column=idx + 1, sticky="nsew", padx=8, pady=8)
+            label.grid(row=0, column=idx + 1, sticky="nsew", padx=4, pady=8)
 
         lag_frame = ctk.CTkFrame(row, fg_color="transparent")
-        lag_frame.grid(row=0, column=5, sticky="nsew", padx=8, pady=6)
+        lag_frame.grid(row=0, column=6, sticky="nsew", padx=4, pady=6)
         lag_frame.grid_columnconfigure(0, weight=1)
         lag_frame.grid_columnconfigure(1, weight=1)
         if self._is_target_device(device):
@@ -1271,7 +1502,7 @@ class WiFiThrottlerApp(ctk.CTk):
                 from_=0,
                 to=100,
                 number_of_steps=100,
-                width=90,
+                width=80,
                 state="normal" if self._is_admin else "disabled",
                 button_color=COLORS["accent_danger"],
                 progress_color=COLORS["accent_danger"],
@@ -1283,7 +1514,7 @@ class WiFiThrottlerApp(ctk.CTk):
                 text=f"{lag_var.get()}%",
                 font=FONTS["tiny"],
                 text_color=COLORS["text_secondary"],
-                width=30
+                width=28
             )
 
             def on_lag_change(value, ip=device.ip, var=lag_var, label_ref=lag_value):
@@ -1296,7 +1527,7 @@ class WiFiThrottlerApp(ctk.CTk):
 
             lag_slider.configure(command=on_lag_change)
             lag_slider.set(lag_var.get())
-            lag_slider.grid(row=0, column=0, sticky="e", padx=(0, 6))
+            lag_slider.grid(row=0, column=0, sticky="e", padx=(0, 4))
             lag_value.grid(row=0, column=1, sticky="w")
         else:
             lag_na = ctk.CTkLabel(
@@ -1308,6 +1539,7 @@ class WiFiThrottlerApp(ctk.CTk):
             )
             lag_na.grid(row=0, column=0, columnspan=2, sticky="nsew")
 
+        # Status column
         status_label = ctk.CTkLabel(
             row,
             text=self._device_status_label(device),
@@ -1315,7 +1547,21 @@ class WiFiThrottlerApp(ctk.CTk):
             text_color=self._status_color(device),
             anchor="center"
         )
-        status_label.grid(row=0, column=6, sticky="nsew", padx=8, pady=8)
+        status_label.grid(row=0, column=7, sticky="nsew", padx=4, pady=8)
+
+        # Bandwidth column
+        bw_label = ctk.CTkLabel(
+            row,
+            text="",
+            font=FONTS["tiny"],
+            text_color=COLORS["text_muted"],
+            anchor="center"
+        )
+        bw_label.grid(row=0, column=8, sticky="nsew", padx=4, pady=8)
+        if not hasattr(row, "bw_labels"):
+            row.bw_labels = []
+        row.bw_labels.append((device.mac, bw_label))
+        self._update_bw_label(bw_label, device.mac)
 
     def _device_display_name(self, device: NetworkDevice) -> str:
         if device.is_self:
@@ -1355,10 +1601,18 @@ class WiFiThrottlerApp(ctk.CTk):
         return COLORS["bg_card"]
 
     def _on_close(self):
-        """Handle window close - cleanup all spoofing."""
+        """Handle window close - cleanup, save config, destroy."""
         for after_id in self.pending_lag_apply_jobs.values():
             self.after_cancel(after_id)
         self.pending_lag_apply_jobs.clear()
+
+        if self._auto_scan_job:
+            self.after_cancel(self._auto_scan_job)
+            self._auto_scan_job = None
+
+        self._bandwidth.stop()
+
+        self._save_config()
 
         self._update_status("Cleaning up... Restoring all devices...")
         self.update()
@@ -1369,3 +1623,23 @@ class WiFiThrottlerApp(ctk.CTk):
             self.after(0, self.destroy)
 
         threading.Thread(target=_cleanup, daemon=True).start()
+
+    def _save_config(self):
+        """Save current app state to persistent config."""
+        try:
+            self.config_mgr.update(
+                theme=self.theme_var.get(),
+                interface_name=self.iface_var.get() if hasattr(self, "iface_var") else "",
+                interface_ip=self.engine.get_interface_snapshot().ip
+                if self.engine.get_interface_snapshot() else "",
+                custom_protected_ips=sorted(self.custom_protected_ips),
+                device_lag_percents=dict(self.device_lag_percents),
+                last_window_width=self.winfo_width(),
+                last_window_height=self.winfo_height(),
+                auto_scan_enabled=self.auto_scan_enabled.get(),
+                auto_scan_interval_minutes=self.auto_scan_interval,
+                new_device_notification_enabled=self._new_device_notification_enabled.get(),
+            )
+            self.config_mgr.save()
+        except Exception as e:
+            print(f"Config save error: {e}")
