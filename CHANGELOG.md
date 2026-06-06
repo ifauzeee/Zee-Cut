@@ -2,26 +2,34 @@
 
 All notable changes to this project are documented in this file.
 
-## [0.2.0] - 2026-06-06
+## [0.3.0] - 2026-06-06
 
 ### Added
-- Bandwidth monitoring per device via scapy sniff — real-time ↑↓ KB/s displayed per row.
-- OUI/Vendor lookup from MAC address — identifies device manufacturer automatically.
-- Persistent session config saved to `%LOCALAPPDATA%/ZeeCut/config.json` (safe list, theme, interface, lag settings, window size).
-- Auto-scan berkala with configurable interval (2/3/5/10 min) using `after()` loop.
-- New device notification via Windows native alert when unknown MAC appears on network.
-- "DL OUI DB" button to download full IEEE OUI database on demand.
-- Bandwidth monitor lifecycle tied to interface selection and scan completion.
+- Smarter throttling with variable poison timing and corrective pulses for natural "lag" feel at level 50.
+- AP isolation detection after scan — warns if router blocks client-to-client ARP.
+- Route print as third fallback in gateway detection for more reliable Windows discovery.
+- Parallel restore for all throttled devices using `ThreadPoolExecutor`.
+- Cross-platform abstraction layer (`core/platform.py`) — detects Windows/Linux/macOS and dispatches admin, ARP table, ping, IP forwarding, and gateway detection accordingly.
+- Linux `/proc/net/arp` and macOS `arp -a` ARP table parsing.
+- Linux `ip route` and macOS `route -n get` gateway detection.
+- IP forwarding support via sysctl (macOS) and `/proc/sys/net/ipv4/ip_forward` (Linux).
+- Column sorting — click Device/IP/MAC/Vendor/Type headers to toggle sort direction (▴/▾).
+- Search/filter input in toolbar — filters by hostname, IP, MAC, or vendor.
+- New device highlight — rows glow with distinct background for 3.5 seconds after scan.
+- Export device list to CSV via toolbar button.
+- Python 3.12 added to CI matrix.
+- Full `[project]` metadata, `[project.urls]`, and `[tool.mypy]` config in `pyproject.toml`.
+- Test coverage expanded to 21 tests: throttle_device (8 tests), GUI callback helpers (3 tests), AP isolation reset, parallel restore, cross-platform ARP parsing.
 
 ### Changed
-- Device list columns reorganized: Vendor (new), Type, Lag %, Status, ↑↓ KB/s (new).
-- Interface selection now restores last-used interface from saved config.
-- Admin permission controls extended to auto-scan toggle and interval dropdown.
-- Theme engine covers all new toolbar elements (auto-scan switch, interval picker, OUI button).
-- GUI refactored: monolithic `gui.py` split into `ui/app.py` (core logic), `ui/header.py`, `ui/toolbar.py`, `ui/device_list.py`, `ui/dialogs.py`.
-- `gui.py` now a thin backward-compatible wrapper importing from `ui.app`.
-- Deleted patch scripts `fix_gui_robust.py` and `fix_perf.py` (patches already applied).
-- `core/network.py`: added `from __future__ import annotations` and full type annotations on all method signatures.
+- `core/admin.py` reduced to 4-line re-export; all logic moved to `core/platform.py`.
+- `_scan_arp_table()`, `_ping_sweep()`, `_get_default_gateway()`, `flush_arp_cache()`, `_read_ip_forwarding_state()`, `enable_ip_forwarding()`, `disable_ip_forwarding()` all delegate to `core.platform`.
+- `main.py` uses `IS_WINDOWS` for elevation prompt; falls back to `sudo` on Unix.
+- `ui/app.py` notification falls back to `print()` on non-Windows.
+- `_refresh_device_list()` now applies sort + search filter in addition to mode filter.
+
+### Fixed
+- `_parse_windows_arp_table` missing `line.strip()` caused regex to never match (bug introduced during refactor).
 
 ## [0.1.2] - 2026-03-29
 

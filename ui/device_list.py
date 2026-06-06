@@ -15,6 +15,15 @@ __all__ = [
 ]
 
 
+SORT_COLUMNS = [
+    "hostname",  # col 1 — Device
+    "ip",        # col 2 — IP
+    "mac",       # col 3 — MAC
+    "vendor",    # col 4 — Vendor
+    "type",      # col 5 — Type
+]
+
+
 def create_device_container(app):
     """Create the device list container with header, selection controls, and scroll frame."""
     container = ctk.CTkFrame(app, fg_color="transparent")
@@ -169,6 +178,34 @@ def render_empty_state(scroll_frame, message="No devices found on this network."
     ).pack()
 
 
+def _sort_key(app, device: NetworkDevice) -> tuple:
+    """Return sort key based on current sort column and direction."""
+    col = app._sort_col
+    val = getattr(device, SORT_COLUMNS[col], "") or ""
+    if col == 0:  # hostname — use device display name
+        val = _device_display_name(device).lower()
+    elif col == 4:  # type
+        val = _device_type_label(app, device).lower()
+    key: tuple = (device.is_self, device.is_gateway, device.is_throttled)
+    if not app._sort_asc:
+        key = key + (val,)
+    else:
+        key = key + (val,)
+    return key
+
+
+def _make_sort_command(app, col_idx: int):
+    """Return a lambda that toggles sort by col_idx and re-renders."""
+    def _sort():
+        if app._sort_col == col_idx:
+            app._sort_asc = not app._sort_asc
+        else:
+            app._sort_col = col_idx
+            app._sort_asc = True
+        app._refresh_device_list()
+    return _sort
+
+
 def render_list_view(app, devices: list[NetworkDevice]):
     """Render the device list header and rows into the scroll frame."""
     scroll = app.device_scroll
@@ -180,12 +217,25 @@ def render_list_view(app, devices: list[NetworkDevice]):
     header.grid(row=0, column=0, sticky="ew", pady=(0, 6))
     _configure_list_columns(header, app)
 
-    for idx, title in enumerate(["Sel", "Device", "IP", "MAC", "Vendor", "Type", "Lag %", "Status", "\u2191\u2193 KB/s"]):
-        label = ctk.CTkLabel(
-            header, text=title,
-            font=FONTS["small"], text_color=COLORS["text_secondary"], anchor="center"
-        )
-        label.grid(row=0, column=idx, sticky="nsew", padx=6, pady=8)
+    titles = ["Sel", "Device", "IP", "MAC", "Vendor", "Type", "Lag %", "Status", "\u2191\u2193 KB/s"]
+    for idx, title in enumerate(titles):
+        if 1 <= idx <= 5:
+            sort_idx = idx - 1
+            arrow = " \u25b4" if app._sort_col == sort_idx and app._sort_asc else \
+                    " \u25be" if app._sort_col == sort_idx else ""
+            lbl = ctk.CTkLabel(
+                header, text=title + arrow,
+                font=FONTS["small"], text_color=COLORS["text_secondary"],
+                anchor="center", cursor="hand2"
+            )
+            lbl.bind("<Button-1>", lambda _e, ci=sort_idx: _make_sort_command(app, ci)())
+        else:
+            lbl = ctk.CTkLabel(
+                header, text=title,
+                font=FONTS["small"], text_color=COLORS["text_secondary"],
+                anchor="center"
+            )
+        lbl.grid(row=0, column=idx, sticky="nsew", padx=6, pady=8)
 
     for idx, device in enumerate(devices, start=1):
         row = ctk.CTkFrame(
@@ -355,6 +405,8 @@ def _status_color(app, device: NetworkDevice) -> str:
 
 
 def _get_row_color(app, device: NetworkDevice) -> str:
+    if device.ip in app._highlight_new_ips:
+        return COLORS["new_device_bg"]
     if device.is_self:
         return COLORS["self_bg"]
     if device.is_gateway:

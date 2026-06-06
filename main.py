@@ -6,35 +6,46 @@ DISCLAIMER: This tool is intended for use ONLY on networks you own and manage.
 Unauthorized use on networks you don't own is illegal.
 """
 
-import ctypes
 import sys
 
 from core.admin import is_admin, run_as_admin
+from core.platform import IS_WINDOWS
 
 
-def main():
-    """Application entry point."""
-    # Auto-elevate to admin if not already
-    if not is_admin():
+def _confirm_elevate() -> bool:
+    """Show platform-appropriate elevation prompt and return True if re-launching."""
+    if IS_WINDOWS:
+        import ctypes
         response = ctypes.windll.user32.MessageBoxW(
             0,
             "Zee-Cut membutuhkan hak Administrator untuk berfungsi.\n\n"
             "Klik 'Yes' untuk menjalankan sebagai Administrator.\n"
             "Klik 'No' untuk menjalankan tanpa hak admin (fungsi terbatas).",
             "Zee-Cut - Administrator Required",
-            0x00000034  # MB_YESNO | MB_ICONQUESTION
+            0x00000034
         )
-        if response == 6:  # IDYES
+        return response == 6
+    # Linux/macOS: no GUI prompt — let user decide from terminal.
+    print(
+        "Zee-Cut requires root privileges for full functionality.\n"
+        "Re-run with: sudo python -m main",
+        file=sys.stderr,
+    )
+    return True  # always attempt sudo re-launch
+
+
+def main():
+    """Application entry point."""
+    if not is_admin():
+        if _confirm_elevate():
             if run_as_admin(__file__):
                 sys.exit(0)
-            return
 
     from ui.app import WiFiThrottlerApp
     app = WiFiThrottlerApp()
     try:
         app.mainloop()
     except KeyboardInterrupt:
-        # Graceful exit when user stops from terminal (Ctrl+C)
         try:
             app.destroy()
         except Exception:

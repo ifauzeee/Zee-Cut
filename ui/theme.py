@@ -27,6 +27,7 @@ THEMES = {
         "normal_bg": "#050505",
         "self_bg": "#071223",
         "gateway_bg": "#07190f",
+        "new_device_bg": "#0a1f0a",
     },
     "google": {
         "bg_dark": "#202124",
@@ -52,6 +53,7 @@ THEMES = {
         "normal_bg": "#2d2f31",
         "self_bg": "#1f2f44",
         "gateway_bg": "#1f3728",
+        "new_device_bg": "#1a3a1a",
     },
 }
 

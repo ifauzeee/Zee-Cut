@@ -23,6 +23,8 @@ from core.models import NetworkDevice
 from core.network import NetworkEngine
 from core.oui import download_oui_database
 from ui.device_list import (
+    _device_status_label,
+    _device_type_label,
     create_device_container,
     refresh_bandwidth_labels,
     render_empty_state,
@@ -72,6 +74,10 @@ class WiFiThrottlerApp(ctk.CTk):
         self._saved_interface_name = saved_config.interface_name
         self._saved_interface_ip = saved_config.interface_ip
         self._known_device_ips: set[str] = set()
+        self._highlight_new_ips: set[str] = set()
+        self._highlight_jobs: list[str] = []
+        self._sort_col: int = 0
+        self._sort_asc: bool = True
         self.list_column_minsize = {
             0: 60, 1: 200, 2: 150, 3: 190, 4: 150, 5: 90, 6: 160, 7: 130, 8: 130,
         }
@@ -484,7 +490,21 @@ class WiFiThrottlerApp(ctk.CTk):
                 self._check_new_device_notification(devices)
             self._start_bandwidth_monitor()
             self._refresh_device_list()
+            if self.engine.get_ap_isolation_detected():
+                self._show_ap_isolation_warning()
         self.after(0, _done)
+
+    def _show_ap_isolation_warning(self):
+        """Show persistent AP isolation warning in the UI."""
+        import tkinter.messagebox as mb
+        mb.showwarning(
+            "AP Isolation Detected",
+            "Your router appears to have AP (client) isolation enabled.\n\n"
+            "This prevents devices on the Wi-Fi from communicating directly.\n"
+            "ARP spoof throttling will NOT work until this is disabled.\n\n"
+            "To fix: log into your router and disable 'AP Isolation',\n"
+            "'Client Isolation', or 'Wireless Isolation' in Wi-Fi settings."
+        )
 
     def _on_devices_updated(self):
         if not self._refresh_pending:
@@ -501,6 +521,9 @@ class WiFiThrottlerApp(ctk.CTk):
             return
         self._last_refresh_time = now
         self._refresh_device_list()
+
+    def _on_search_key(self, _event=None):
+        self.after(200, self._refresh_device_list)
 
     def _on_status_changed(self, message: str):
         self.after(0, lambda: self._update_status(message))
@@ -565,18 +588,34 @@ class WiFiThrottlerApp(ctk.CTk):
     def _check_new_device_notification(self, devices: list[NetworkDevice]):
         current = {d.ip for d in devices if not d.is_self and not d.is_gateway}
         new_ips = current - self._known_device_ips
-        if new_ips and self._new_device_notification_enabled.get():
-            for ip in new_ips:
-                d = next((x for x in devices if x.ip == ip), None)
-                if d:
-                    name = d.vendor if d.vendor != "Unknown" else d.hostname
-                    self._show_notification("New Device Detected", f"{name} ({d.ip}) - {d.mac.upper()}")
+        if new_ips:
+            self._highlight_new_ips.update(new_ips)
+            for job in self._highlight_jobs:
+                self.after_cancel(job)
+            self._highlight_jobs.clear()
+            job = self.after(3500, self._clear_new_device_highlight)
+            self._highlight_jobs.append(job)
+            if self._new_device_notification_enabled.get():
+                for ip in new_ips:
+                    d = next((x for x in devices if x.ip == ip), None)
+                    if d:
+                        name = d.vendor if d.vendor != "Unknown" else d.hostname
+                        self._show_notification("New Device Detected", f"{name} ({d.ip}) - {d.mac.upper()}")
         self._known_device_ips = current
+
+    def _clear_new_device_highlight(self):
+        self._highlight_new_ips.clear()
+        self._highlight_jobs.clear()
+        self._refresh_device_list()
 
     def _show_notification(self, title: str, message: str):
         try:
-            import ctypes
-            ctypes.windll.user32.MessageBoxW(0, message, title, 0x00000040 | 0x00001000)
+            from core.platform import IS_WINDOWS
+            if IS_WINDOWS:
+                import ctypes
+                ctypes.windll.user32.MessageBoxW(0, message, title, 0x00000040 | 0x00001000)
+            else:
+                print(f"[{title}] {message}")
         except Exception:
             pass
 
@@ -636,6 +675,30 @@ class WiFiThrottlerApp(ctk.CTk):
         except Exception as e:
             messagebox.showerror("Export Diagnostics", f"Failed to export diagnostics:\n{e}")
 
+    def _export_csv(self):
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = filedialog.asksaveasfilename(
+            title="Export Device List as CSV", defaultextension=".csv",
+            initialfile=f"zee-cut-devices-{timestamp}.csv",
+            filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")]
+        )
+        if not path:
+            return
+        try:
+            devices = self.engine.get_devices_snapshot()
+            lines = ["Device,IP,MAC,Vendor,Type,Status,Lag%"]
+            for d in devices:
+                dtype = _device_type_label(self, d)
+                status = _device_status_label(self, d)
+                lines.append(
+                    f"{d.hostname},{d.ip},{d.mac.upper()},{d.vendor},{dtype},{status},{100 - d.throttle_level}"
+                )
+            Path(path).write_text("\n".join(lines), encoding="utf-8")
+            self._update_status(f"Devices exported: {path}")
+            messagebox.showinfo("Export CSV", f"Saved to:\n{path}")
+        except Exception as e:
+            messagebox.showerror("Export CSV", f"Failed to export:\n{e}")
+
     def _refresh_device_list(self):
         if not hasattr(self, "device_scroll"):
             return
@@ -643,10 +706,9 @@ class WiFiThrottlerApp(ctk.CTk):
         for widget in self.device_scroll.winfo_children():
             widget.destroy()
 
-        all_devices = sorted(
-            self.engine.get_devices_snapshot(),
-            key=lambda d: (not d.is_self, not d.is_gateway, not d.is_throttled, [int(x) for x in d.ip.split('.')])
-        )
+        all_devices = self.engine.get_devices_snapshot()
+        from ui.device_list import _sort_key
+        all_devices.sort(key=lambda d: _sort_key(self, d))
         self._sync_device_control_state(all_devices)
 
         if not all_devices:
@@ -657,10 +719,22 @@ class WiFiThrottlerApp(ctk.CTk):
 
         mode = self.filter_mode_var.get()
         filtered = self._filter_devices(all_devices, mode)
+
+        # Apply search filter
+        query = self.search_var.get().strip().lower() if hasattr(self, "search_var") else ""
+        if query:
+            filtered = [
+                d for d in filtered
+                if query in d.ip.lower()
+                or query in d.mac.lower()
+                or query in d.hostname.lower()
+                or query in d.vendor.lower()
+            ]
+
         self.device_header.configure(text=f"Connected Devices ({len(filtered)}/{len(all_devices)})")
 
         if not filtered:
-            render_empty_state(self.device_scroll, f"No device matches mode '{mode}'.")
+            render_empty_state(self.device_scroll, "No device matches filter.")
         else:
             render_list_view(self, filtered)
 

@@ -53,6 +53,17 @@ def create_toolbar(app):
     )
     app.filter_mode_dropdown.pack(side="left", padx=(0, 10))
 
+    search_entry = ctk.CTkEntry(
+        left_toolbar, placeholder_text="Search device...",
+        font=FONTS["small"], fg_color=COLORS["bg_input"],
+        border_color=COLORS["border_light"], text_color=COLORS["text_primary"],
+        corner_radius=8, width=160
+    )
+    search_entry.pack(side="left", padx=(0, 10))
+    search_entry.bind("<KeyRelease>", app._on_search_key)
+    app.search_var = ctk.StringVar()
+    search_entry.configure(textvariable=app.search_var)
+
     right_toolbar = ctk.CTkFrame(app.toolbar_frame, fg_color="transparent")
     right_toolbar.grid(row=0, column=1, padx=16, pady=10, sticky="e")
 
@@ -88,7 +99,15 @@ def create_toolbar(app):
         hover_color=COLORS["bg_card_hover"], text_color=COLORS["text_primary"],
         corner_radius=8, width=148, height=38, command=app._export_diagnostics
     )
-    app.export_diag_btn.pack(side="left", padx=(0, 8))
+    app.export_diag_btn.pack(side="left", padx=(0, 4))
+
+    app.export_csv_btn = ctk.CTkButton(
+        right_toolbar, text="Export CSV",
+        font=FONTS["small"], fg_color=COLORS["bg_input"],
+        hover_color=COLORS["bg_card_hover"], text_color=COLORS["text_primary"],
+        corner_radius=8, width=100, height=38, command=app._export_csv
+    )
+    app.export_csv_btn.pack(side="left", padx=(0, 8))
 
     app.scan_btn = ctk.CTkButton(
         right_toolbar, text="Scan Network",

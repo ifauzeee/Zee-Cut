@@ -1,6 +1,58 @@
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "zee-cut"
+version = "0.3.0"
+description = "Wi-Fi network throttling tool — manage bandwidth per-device via ARP spoofing"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+keywords = ["network", "arp-spoofing", "bandwidth", "throttle", "wifi"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Networking",
+]
+dependencies = [
+    "scapy>=2.5.0,<3.0",
+    "customtkinter>=5.2.0,<6.0",
+    "psutil>=5.9.0,<7.0",
+    "pyinstaller>=6.0,<7.0",
+    "pillow>=10.0,<12.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ifauzeee/Zee-Cut"
+Repository = "https://github.com/ifauzeee/Zee-Cut"
+Issues = "https://github.com/ifauzeee/Zee-Cut/issues"
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = false
+warn_unused_configs = true
+ignore_missing_imports = true
+disallow_untyped_defs = false
+check_untyped_defs = true
+warn_return_any = true
+warn_unused_ignores = true
+no_implicit_reexport = true
+
+[[tool.mypy.overrides]]
+module = ["scapy.*", "psutil", "customtkinter"]
+ignore_missing_imports = true
