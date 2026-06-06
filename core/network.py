@@ -4,6 +4,8 @@ Handles network scanning, ARP spoofing for throttling, and device management.
 Uses multiple scan methods for maximum device detection on Windows.
 """
 
+from __future__ import annotations
+
 import json
 import logging
 import re
@@ -12,7 +14,7 @@ import struct
 import subprocess
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,26 +36,26 @@ from core.oui import lookup_vendor
 class NetworkEngine:
     """Core engine for network scanning and ARP-based throttling."""
 
-    def __init__(self):
-        self.log_file = (Path(__file__).resolve().parent.parent / "logs" / "network_engine.log")
-        self._logger = self._build_logger()
+    def __init__(self) -> None:
+        self.log_file: Path = Path(__file__).resolve().parent.parent / "logs" / "network_engine.log"
+        self._logger: logging.Logger = self._build_logger()
         self.devices: dict[str, NetworkDevice] = {}
         self.interface: Optional[NetworkInterface] = None
-        self._state_lock = threading.RLock()
+        self._state_lock: threading.RLock = threading.RLock()
         self._throttle_threads: dict[str, threading.Thread] = {}
         self._throttle_stop_events: dict[str, threading.Event] = {}
         self._scan_thread: Optional[threading.Thread] = None
-        self._running = False
+        self._running: bool = False
         self._hostname_cache: dict[str, str] = {}
-        self._hostname_futures = {}
-        self._hostname_lock = threading.Lock()
-        self._hostname_executor = ThreadPoolExecutor(max_workers=8)
+        self._hostname_futures: dict[str, Future] = {}
+        self._hostname_lock: threading.Lock = threading.Lock()
+        self._hostname_executor: ThreadPoolExecutor = ThreadPoolExecutor(max_workers=8)
         self._ip_forwarding_original: Optional[int] = None
-        self._ip_forwarding_enabled_by_app = False
-        self._scan_sequence = 0
-        self._last_scan_summary: dict = {}
-        self.on_devices_updated: Optional[Callable] = None
-        self.on_status_changed: Optional[Callable] = None
+        self._ip_forwarding_enabled_by_app: bool = False
+        self._scan_sequence: int = 0
+        self._last_scan_summary: dict[str, object] = {}
+        self.on_devices_updated: Optional[Callable[[], None]] = None
+        self.on_status_changed: Optional[Callable[[str], None]] = None
         self._logger.info("NetworkEngine initialized")
 
     def _build_logger(self) -> logging.Logger:
@@ -105,7 +107,7 @@ class NetworkEngine:
             sequence = self._scan_sequence
         return f"scan-{sequence:04d}"
 
-    def _build_scan_log_event(self, event: str, **fields) -> str:
+    def _build_scan_log_event(self, event: str, **fields: object) -> str:
         """Build structured scan event payload."""
         payload = {
             "event": event,
@@ -217,7 +219,7 @@ class NetworkEngine:
         except Exception:
             return False
 
-    def set_interface(self, interface: NetworkInterface):
+    def set_interface(self, interface: NetworkInterface) -> None:
         """Set the active network interface."""
         with self._state_lock:
             self.interface = interface
@@ -446,7 +448,7 @@ class NetworkEngine:
         self._scan_thread = threading.Thread(target=_scan, daemon=True)
         self._scan_thread.start()
 
-    def _scan_arp_table(self):
+    def _scan_arp_table(self) -> None:
         """Read devices from Windows ARP table (arp -a)."""
         try:
             with self._state_lock:
@@ -501,7 +503,7 @@ class NetworkEngine:
 
         return entries
 
-    def _ping_sweep(self, timeout_ms: int = 250, workers: int = 64):
+    def _ping_sweep(self, timeout_ms: int = 250, workers: int = 64) -> None:
         """Fast parallel ping sweep to warm ARP cache."""
         try:
             subnet_prefix = '.'.join(self.interface.ip.split('.')[:3])
@@ -524,7 +526,7 @@ class NetworkEngine:
         except Exception:
             pass
 
-    def _scan_scapy_arp(self, timeout: int = 4, retry: int = 2):
+    def _scan_scapy_arp(self, timeout: int = 4, retry: int = 2) -> None:
         """Scan using scapy ARP requests."""
         if not SCAPY_AVAILABLE:
             return
@@ -551,7 +553,7 @@ class NetworkEngine:
         except Exception as e:
             self._notify_status(f"Scapy ARP scan: {e}")
 
-    def _resolve_gateway_mac(self):
+    def _resolve_gateway_mac(self) -> None:
         """Resolve the gateway MAC address."""
         with self._state_lock:
             if not self.interface or not self.interface.gateway_ip:
@@ -607,7 +609,7 @@ class NetworkEngine:
         except Exception:
             pass
 
-    def _add_or_update_device(self, ip: str, mac: str):
+    def _add_or_update_device(self, ip: str, mac: str) -> None:
         """Add or update a device in the device list."""
         with self._state_lock:
             is_gateway = (ip == self.interface.gateway_ip) if self.interface else False
@@ -641,7 +643,7 @@ class NetworkEngine:
         if hostname == "Unknown":
             self._queue_hostname_resolution(ip)
 
-    def _queue_hostname_resolution(self, ip: str):
+    def _queue_hostname_resolution(self, ip: str) -> None:
         """Resolve hostnames in background to avoid slowing down network scan."""
         with self._hostname_lock:
             if ip in self._hostname_cache:
@@ -657,7 +659,7 @@ class NetworkEngine:
                 lambda fut, target_ip=ip: self._on_hostname_resolved(target_ip, fut)
             )
 
-    def _on_hostname_resolved(self, ip: str, future):
+    def _on_hostname_resolved(self, ip: str, future: Future) -> None:
         try:
             hostname = future.result()
         except Exception:
@@ -744,7 +746,7 @@ class NetworkEngine:
         )
         sendp(broadcast, verbose=False, count=max(1, count // 2), iface=iface)
 
-    def throttle_device(self, ip: str, level: int = 0):
+    def throttle_device(self, ip: str, level: int = 0) -> None:
         """
         Throttle a device using ARP spoofing.
         level: 0 = full block, 50 = intermittent, 100 = normal
@@ -841,7 +843,7 @@ class NetworkEngine:
             self._throttle_threads[ip] = thread
         thread.start()
 
-    def restore_device(self, ip: str):
+    def restore_device(self, ip: str) -> None:
         """Restore a device to normal network operation."""
         with self._state_lock:
             stop_event = self._throttle_stop_events.pop(ip, None)
@@ -912,7 +914,7 @@ class NetworkEngine:
                 device.is_throttled = False
                 device.throttle_level = 100
 
-    def restore_all(self):
+    def restore_all(self) -> None:
         """Restore all throttled devices."""
         with self._state_lock:
             throttled = [ip for ip, dev in self.devices.items() if dev.is_throttled]
@@ -920,7 +922,7 @@ class NetworkEngine:
             self.restore_device(ip)
         self._notify_status("All devices restored to normal")
 
-    def cleanup(self):
+    def cleanup(self) -> None:
         """Clean up all spoofing before exit."""
         with self._state_lock:
             self._running = False
@@ -969,7 +971,7 @@ class NetworkEngine:
         except Exception:
             return []
 
-    def _notify_status(self, message: str):
+    def _notify_status(self, message: str) -> None:
         """Send status update."""
         self._logger.info(message)
         if self.on_status_changed:
@@ -1004,7 +1006,7 @@ class NetworkEngine:
         except Exception:
             return None
 
-    def enable_ip_forwarding(self):
+    def enable_ip_forwarding(self) -> None:
         """Enable IP forwarding on Windows."""
         try:
             current_state = self._read_ip_forwarding_state()
@@ -1038,7 +1040,7 @@ class NetworkEngine:
         except Exception as e:
             self._notify_status(f"Failed to enable IP forwarding: {e}")
 
-    def disable_ip_forwarding(self):
+    def disable_ip_forwarding(self) -> None:
         """Disable IP forwarding on Windows."""
         if not self._ip_forwarding_enabled_by_app:
             self._logger.info(

@@ -29,7 +29,7 @@ def main():
                 sys.exit(0)
             return
 
-    from gui import WiFiThrottlerApp
+    from ui.app import WiFiThrottlerApp
     app = WiFiThrottlerApp()
     try:
         app.mainloop()

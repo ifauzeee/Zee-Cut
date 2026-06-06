@@ -18,6 +18,10 @@ All notable changes to this project are documented in this file.
 - Interface selection now restores last-used interface from saved config.
 - Admin permission controls extended to auto-scan toggle and interval dropdown.
 - Theme engine covers all new toolbar elements (auto-scan switch, interval picker, OUI button).
+- GUI refactored: monolithic `gui.py` split into `ui/app.py` (core logic), `ui/header.py`, `ui/toolbar.py`, `ui/device_list.py`, `ui/dialogs.py`.
+- `gui.py` now a thin backward-compatible wrapper importing from `ui.app`.
+- Deleted patch scripts `fix_gui_robust.py` and `fix_perf.py` (patches already applied).
+- `core/network.py`: added `from __future__ import annotations` and full type annotations on all method signatures.
 
 ## [0.1.2] - 2026-03-29
 
