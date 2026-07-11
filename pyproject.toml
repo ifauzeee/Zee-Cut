@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "zee-cut"
-version = "0.4.0"
+version = "0.5.0"
 description = "Wi-Fi network throttling tool — manage bandwidth per-device via ARP spoofing"
 readme = "README.md"
 requires-python = ">=3.10"

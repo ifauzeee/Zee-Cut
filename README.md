@@ -159,7 +159,8 @@ python -m PyInstaller \
     --onefile \
     --windowed \
     --name "Zee-Cut" \
-    --add-data "core;core" \
+    --icon "assets/icon.ico" \
+    --add-data "assets;assets" \
     --hidden-import "scapy" \
     --hidden-import "scapy.all" \
     --hidden-import "scapy.layers.l2" \

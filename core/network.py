@@ -48,6 +48,7 @@ from core.platform import (
     read_ip_forwarding_state,
     subprocess_run,
 )
+from core.shaper import shape_device, unshape_device
 
 
 class NetworkEngine:
@@ -72,6 +73,7 @@ class NetworkEngine:
         self._scan_sequence: int = 0
         self._last_scan_summary: dict[str, object] = {}
         self._ap_isolation_detected: bool = False
+        self.bandwidth_shaping_enabled: bool = False
         self.on_devices_updated: Optional[Callable[[], None]] = None
         self.on_status_changed: Optional[Callable[[str], None]] = None
         self._logger.info("NetworkEngine initialized")
@@ -822,6 +824,14 @@ class NetworkEngine:
             self._throttle_threads[ip] = thread
         thread.start()
 
+        if self.bandwidth_shaping_enabled:
+            iface_name = self.interface.name if self.interface else None
+            shape_device(ip, self._level_to_kbps(level), iface_name)
+
+    def _level_to_kbps(self, level: int) -> int:
+        """Map a throttle level (0=block .. 100=normal) to a rough kbps cap."""
+        return max(1, (100 - max(0, min(100, level))) * 10)
+
     def restore_device(self, ip: str) -> None:
         """Restore a device to normal network operation."""
         with self._state_lock:
@@ -833,6 +843,10 @@ class NetworkEngine:
 
         if thread:
             thread.join(timeout=3)
+
+        if self.bandwidth_shaping_enabled:
+            iface_name = self.interface.name if self.interface else None
+            unshape_device(ip, iface_name)
 
         with self._state_lock:
             device = self.devices.get(ip)

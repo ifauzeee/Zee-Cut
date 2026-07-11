@@ -4,6 +4,7 @@ All core logic and callbacks, with UI creation delegated to submodules.
 """
 
 import json
+import logging
 import os
 import sys
 import threading
@@ -22,6 +23,7 @@ from core.config import ConfigManager
 from core.models import NetworkDevice
 from core.network import NetworkEngine
 from core.oui import download_oui_database
+from core.updater import check_for_update, get_current_version
 from ui.device_list import (
     _device_status_label,
     _device_type_label,
@@ -37,6 +39,8 @@ from ui.toolbar import create_toolbar
 
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
+
+logger = logging.getLogger("zee_cut.app")
 
 
 class WiFiThrottlerApp(ctk.CTk):
@@ -98,6 +102,9 @@ class WiFiThrottlerApp(ctk.CTk):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
+        # Non-blocking update check on a background thread.
+        threading.Thread(target=self._check_for_update, daemon=True).start()
+
     # ─── Window / Layout ───────────────────────────────────────────────
 
     def _setup_window(self, saved_config=None):
@@ -150,6 +157,36 @@ class WiFiThrottlerApp(ctk.CTk):
         if not self._is_admin:
             admin_warning()
         self._load_interfaces()
+
+    def _check_for_update(self) -> None:
+        """Background task: poll GitHub for a newer release and notify the user."""
+        try:
+            result = check_for_update(get_current_version())
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Update check error: %s", e)
+            return
+
+        if result.get("error"):
+            return
+        if not result.get("available"):
+            return
+
+        latest = str(result.get("latest", ""))
+        url = str(result.get("url", ""))
+
+        def _notify() -> None:
+            from tkinter import messagebox
+
+            answer = messagebox.askyesno(
+                "Pembaruan Tersedia",
+                f"Versi terbaru Zee-Cut {latest} telah tersedia.\n"
+                f"Versi Anda: {get_current_version()}.\n\n"
+                "Buka halaman rilis sekarang?",
+            )
+            if answer and url:
+                webbrowser.open(url)
+
+        self.after(0, _notify)
 
     def _apply_admin_permissions(self):
         admin = self._is_admin
