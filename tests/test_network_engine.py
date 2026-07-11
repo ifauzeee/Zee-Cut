@@ -5,6 +5,13 @@ from unittest.mock import MagicMock, call, patch
 from core.models import NetworkDevice, NetworkInterface
 from core.network import NetworkEngine
 
+try:
+    import customtkinter  # noqa: F401
+
+    HAS_UI = True
+except ImportError:
+    HAS_UI = False
+
 
 def _make_interface(
     ip="192.168.1.10",
@@ -280,6 +287,7 @@ class NetworkEngineTests(unittest.TestCase):
 
     # ── GUI callback helpers ─────────────────────────────────────────
 
+    @unittest.skipIf(not HAS_UI, "customtkinter not available")
     def test_lag_percent_to_level_conversion(self):
         from ui.app import WiFiThrottlerApp
         app = WiFiThrottlerApp
@@ -289,6 +297,7 @@ class NetworkEngineTests(unittest.TestCase):
         self.assertEqual(app._lag_percent_to_level(None, -10), 100)
         self.assertEqual(app._lag_percent_to_level(None, 150), 0)
 
+    @unittest.skipIf(not HAS_UI, "customtkinter not available")
     def test_is_target_device_filters_self_and_gateway(self):
         from ui.app import WiFiThrottlerApp
 
@@ -304,6 +313,7 @@ class NetworkEngineTests(unittest.TestCase):
         self.assertFalse(app._is_target_device(self_dev))
         self.assertFalse(app._is_target_device(gw_dev))
 
+    @unittest.skipIf(not HAS_UI, "customtkinter not available")
     def test_is_protected_device_includes_custom_and_system(self):
         from ui.app import WiFiThrottlerApp
 
