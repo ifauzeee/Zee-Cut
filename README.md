@@ -22,6 +22,8 @@
 
 Whether you need to limit bandwidth-hogging devices or manage network access on your own WiFi, Zee-Cut provides an intuitive, one-click solution.
 
+> **💡 Platform support:** Windows is the primary, fully-supported platform. A cross-platform abstraction layer (Linux/macOS) was added in `0.3.0`, but non-Windows support is **experimental** — ARP operations, elevation, and packet capture differ per OS and may require additional setup.
+
 > **⚠️ Legal Notice:** This tool is designed exclusively for use on networks you own and administer. Unauthorized use on networks you do not own is illegal and unethical. The developers assume no liability for misuse.
 
 ---
@@ -210,7 +212,7 @@ Zee-Cut/
 
 - **Administrator privileges** are mandatory — ARP operations require raw socket access
 - **Npcap must be installed** — Required by Scapy for packet capture on Windows
-- **Windows only** — This application is designed for Windows 10/11
+- **Windows is fully supported** — This application is designed and tested for Windows 10/11. Linux/macOS support is experimental (see note above).
 - **Closing the app restores all devices** — No permanent network disruption
 - **Use responsibly** — Only on networks you own and manage
 

@@ -2,6 +2,19 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.4.0] - 2026-07-11
+
+### Added
+- `mypy` type-check step in CI (`ci.yml`) — currently non-blocking while pre-existing errors (mostly scapy stub gaps) are resolved.
+- Test coverage reporting via `coverage` in CI; `mypy` and `coverage` added to `requirements-dev.txt`.
+- UI smoke tests (`tests/test_ui.py`): theme integrity assertions and import-safety checks for all `ui/` modules with `customtkinter` mocked.
+
+### Changed
+- Corrected `build-backend` in `pyproject.toml` from the invalid `setuptools.backends._legacy:_Backend` to the standard `setuptools.build_meta`.
+- `mypy` type-check step in CI is now a required gate (was non-blocking) after resolving all 25 pre-existing errors — `scapy_iface` typed as `Any`, `subprocess_run` annotated as `CompletedProcess[str]`, and `None`/typed-lambda issues fixed.
+- Bumped classifier to `Development Status :: 4 - Beta`.
+- README synced with code: Windows is the fully-supported platform; Linux/macOS support is documented as experimental (cross-platform layer added in 0.3.0).
+
 ## [0.3.0] - 2026-06-06
 
 ### Added

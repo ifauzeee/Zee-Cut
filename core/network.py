@@ -20,7 +20,15 @@ from pathlib import Path
 from typing import Callable, Optional
 
 try:
-    from scapy.all import ARP, IFACES, Ether, conf, getmacbyip, sendp, srp
+    from scapy.all import (  # type: ignore[attr-defined]
+        ARP,
+        IFACES,
+        Ether,
+        conf,
+        getmacbyip,
+        sendp,
+        srp,
+    )
     SCAPY_AVAILABLE = True
 except ImportError:
     SCAPY_AVAILABLE = False
@@ -136,11 +144,11 @@ class NetworkEngine:
         scapy_iface_map = {}
         if SCAPY_AVAILABLE:
             try:
-                for iface in IFACES.values():
+                for scapy_if in IFACES.values():
                     try:
-                        ip = getattr(iface, 'ip', None) or getattr(iface, 'ips', [None])[0]
+                        ip = getattr(scapy_if, 'ip', None) or getattr(scapy_if, 'ips', [None])[0]
                         if ip and ip != '127.0.0.1' and ip != '0.0.0.0':
-                            scapy_iface_map[ip] = iface
+                            scapy_iface_map[ip] = scapy_if
                     except Exception:
                         pass
             except Exception:
@@ -162,7 +170,7 @@ class NetworkEngine:
 
             if ipv4 and mac:
                 gateway_ip = self._get_default_gateway(ipv4)
-                scapy_if = scapy_iface_map.get(ipv4, None)
+                scapy_iface = scapy_iface_map.get(ipv4, None)
 
                 iface = NetworkInterface(
                     name=iface_name,
@@ -171,7 +179,7 @@ class NetworkEngine:
                     mac=mac.replace("-", ":").lower(),
                     gateway_ip=gateway_ip,
                     subnet_mask=subnet,
-                    scapy_iface=scapy_if
+                    scapy_iface=scapy_iface
                 )
                 interfaces.append(iface)
 
@@ -187,7 +195,7 @@ class NetworkEngine:
             ip1_int = struct.unpack('!I', socket.inet_aton(ip1))[0]
             ip2_int = struct.unpack('!I', socket.inet_aton(ip2))[0]
             mask_int = struct.unpack('!I', socket.inet_aton(mask))[0]
-            return (ip1_int & mask_int) == (ip2_int & mask_int)
+            return bool((ip1_int & mask_int) == (ip2_int & mask_int))
         except Exception:
             return False
 
@@ -439,6 +447,8 @@ class NetworkEngine:
 
     def _ping_sweep(self, timeout_ms: int = 250, workers: int = 64) -> None:
         """Fast parallel ping sweep to warm ARP cache (cross-platform)."""
+        if self.interface is None:
+            return
         try:
             subnet_prefix = '.'.join(self.interface.ip.split('.')[:3])
             ips = [f"{subnet_prefix}.{i}" for i in range(1, 255)]
@@ -460,6 +470,8 @@ class NetworkEngine:
     def _scan_scapy_arp(self, timeout: int = 4, retry: int = 2) -> None:
         """Scan using scapy ARP requests."""
         if not SCAPY_AVAILABLE:
+            return
+        if self.interface is None:
             return
 
         try:
@@ -579,9 +591,11 @@ class NetworkEngine:
 
             future = self._hostname_executor.submit(self._resolve_hostname, ip)
             self._hostname_futures[ip] = future
-            future.add_done_callback(
-                lambda fut, target_ip=ip: self._on_hostname_resolved(target_ip, fut)
-            )
+
+            def _on_done(fut: Future, target_ip: str = ip) -> None:
+                self._on_hostname_resolved(target_ip, fut)
+
+            future.add_done_callback(_on_done)
 
     def _on_hostname_resolved(self, ip: str, future: Future) -> None:
         try:

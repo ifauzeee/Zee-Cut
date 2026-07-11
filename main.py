@@ -24,7 +24,7 @@ def _confirm_elevate() -> bool:
             "Zee-Cut - Administrator Required",
             0x00000034
         )
-        return response == 6
+        return bool(response == 6)
     # Linux/macOS: no GUI prompt — let user decide from terminal.
     print(
         "Zee-Cut requires root privileges for full functionality.\n"

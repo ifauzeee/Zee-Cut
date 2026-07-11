@@ -1,17 +1,17 @@
 [build-system]
 requires = ["setuptools>=64.0"]
-build-backend = "setuptools.backends._legacy:_Backend"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "zee-cut"
-version = "0.3.0"
+version = "0.4.0"
 description = "Wi-Fi network throttling tool — manage bandwidth per-device via ARP spoofing"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "MIT"}
 keywords = ["network", "arp-spoofing", "bandwidth", "throttle", "wifi"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Win32 (MS Windows)",
     "Intended Audience :: End Users/Desktop",
     "License :: OSI Approved :: MIT License",

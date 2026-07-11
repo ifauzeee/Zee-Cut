@@ -27,3 +27,4 @@ Thumbs.db
 # Runtime logs
 logs/
 *.log
+repomix-output.xml

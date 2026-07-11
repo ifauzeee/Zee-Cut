@@ -108,7 +108,7 @@ class WiFiThrottlerApp(ctk.CTk):
         self.minsize(980, 640)
         self.configure(fg_color=COLORS["bg_dark"])
         try:
-            base = sys._MEIPASS if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+            base = sys._MEIPASS if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))  # type: ignore[attr-defined]
             icon_path = os.path.join(base, "assets", "icon.ico")
             if os.path.exists(icon_path):
                 self.iconbitmap(icon_path)
@@ -775,7 +775,9 @@ class WiFiThrottlerApp(ctk.CTk):
             self.config_mgr.update(
                 theme=self.theme_var.get(),
                 interface_name=self.iface_var.get() if hasattr(self, "iface_var") else "",
-                interface_ip=self.engine.get_interface_snapshot().ip if self.engine.get_interface_snapshot() else "",
+                interface_ip=(
+                    snapshot.ip if (snapshot := self.engine.get_interface_snapshot()) else ""
+                ),
                 custom_protected_ips=sorted(self.custom_protected_ips),
                 device_lag_percents=dict(self.device_lag_percents),
                 last_window_width=self.winfo_width(),

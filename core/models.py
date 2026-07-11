@@ -3,6 +3,7 @@ Core network models.
 """
 
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
@@ -29,4 +30,4 @@ class NetworkInterface:
     gateway_ip: str = ""
     gateway_mac: str = ""
     subnet_mask: str = "255.255.255.0"
-    scapy_iface: object = None  # Store scapy interface reference
+    scapy_iface: Any = None  # Store scapy interface reference

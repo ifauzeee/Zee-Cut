@@ -8,7 +8,7 @@ import platform
 import re
 import subprocess
 import sys
-from typing import Optional
+from typing import Optional, cast
 
 SYSTEM: str = platform.system().lower()
 IS_WINDOWS: bool = SYSTEM == "windows"
@@ -31,17 +31,20 @@ def subprocess_run(
     text: bool = True,
     timeout: int = 10,
     **kwargs,
-) -> subprocess.CompletedProcess:
+) -> subprocess.CompletedProcess[str]:
     """Run a subprocess with platform-appropriate CREATE_NO_WINDOW."""
     kwargs.setdefault("creationflags", 0)
     if IS_WINDOWS:
         kwargs["creationflags"] |= _CREATE_NO_WINDOW
-    return subprocess.run(
-        args,
-        capture_output=capture_output,
-        text=text,
-        timeout=timeout,
-        **kwargs,
+    return cast(
+        "subprocess.CompletedProcess[str]",
+        subprocess.run(
+            args,
+            capture_output=capture_output,
+            text=text,
+            timeout=timeout,
+            **kwargs,
+        ),
     )
 
 
@@ -51,10 +54,10 @@ def is_admin() -> bool:
     """Check whether the current process has admin/root privileges."""
     if IS_WINDOWS:
         try:
-            return ctypes.windll.shell32.IsUserAnAdmin() != 0
+            return bool(ctypes.windll.shell32.IsUserAnAdmin() != 0)
         except Exception:
             return False
-    return os.geteuid() == 0
+    return bool(os.geteuid() == 0)  # type: ignore[attr-defined]
 
 
 def run_as_admin(entry_file: str) -> bool:
@@ -70,7 +73,7 @@ def run_as_admin(entry_file: str) -> bool:
             result = ctypes.windll.shell32.ShellExecuteW(
                 None, "runas", script, params, None, 1
             )
-            return result > 32
+            return bool(result > 32)
         except Exception:
             return False
     try:
@@ -328,7 +331,7 @@ def _same_subnet(ip1: str, ip2: str, mask: str = "255.255.255.0") -> bool:
 def struct_unpack_ip(ip: str) -> int:
     import socket
     import struct
-    return struct.unpack("!I", socket.inet_aton(ip))[0]
+    return int(struct.unpack("!I", socket.inet_aton(ip))[0])
 
 
 # ── IP forwarding ──────────────────────────────────────────────────
