@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.5.1] - 2026-07-11
+
+### Changed
+- CI now builds the NSIS installer automatically on release tags (`build-installer` job) and uploads `Zee-Cut-Setup-<tag>.exe` to the GitHub release.
+- `installer/zee-cut.nsi` version is overridable via `/DAPPVERSION`.
+- Bumped fallback version constant for the frozen build.
+
 ## [0.5.0] - 2026-07-11
 
 ### Added

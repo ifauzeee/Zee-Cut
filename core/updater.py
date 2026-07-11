@@ -18,7 +18,7 @@ logger = logging.getLogger("zee_cut.updater")
 
 # Fallback used when the VERSION file is not bundled (e.g. frozen EXE build).
 # Kept in sync with the VERSION file at release time.
-FALLBACK_VERSION = "0.5.0"
+FALLBACK_VERSION = "0.5.1"
 
 DEFAULT_REPO = "ifauzeee/Zee-Cut"
 API_URL = f"https://api.github.com/repos/{DEFAULT_REPO}/releases/latest"
