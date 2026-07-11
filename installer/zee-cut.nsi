@@ -5,7 +5,9 @@
 ; shortcut, and reminds the user that Npcap + Administrator rights are needed.
 
 !define APPNAME "Zee-Cut"
+!ifndef APPVERSION
 !define APPVERSION "0.5.0"
+!endif
 !define PUBLISHER "ifauzeee"
 
 Name "${APPNAME} ${APPVERSION}"
