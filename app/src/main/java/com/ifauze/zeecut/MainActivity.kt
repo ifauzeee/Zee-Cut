@@ -81,7 +81,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun prepareBinary(): String {
-        val src = File(applicationInfo.nativeLibraryDir, "arp_spoof")
+        val src = File(applicationInfo.nativeLibraryDir, "libarp_spoof.so")
         val dst = File(filesDir, "arp_spoof")
         if (!dst.exists() || dst.length() != src.length()) {
             src.inputStream().use { fi -> dst.outputStream().use { fo -> fi.copyTo(fo) } }

@@ -77,14 +77,16 @@ adb shell su -c "tcpdump -en -i wlan0 arp"   # or use a packet capture app
 ## Troubleshooting
 
 - **App says the binary is missing / `FileNotFound` at `prepareBinary`**: the NDK-built
-  `arp_spoof` executable must be packaged into the APK under `lib/<abi>/`. Verify with:
+  binary is packaged as `libarp_spoof.so` (renamed so AGP includes it) and extracted to
+  `nativeLibraryDir` thanks to `android:extractNativeLibs="true"` +
+  `packaging.jniLibs.useLegacyPackaging`. Verify it is inside the APK:
   ```
   unzip -l app/build/outputs/apk/debug/app-debug.apk | grep arp_spoof
   ```
-  If it is absent, ensure `app/build.gradle.kts` `externalNativeBuild` points at
-  `jni/CMakeLists.txt` and that a CMake/NDK build actually ran (Build → Refresh Linked
-  C++ Projects). On `noexec` system partitions the app already copies the binary to a
-  writable private dir and `chmod 0755`, so that case is handled.
+  Expected: `lib/arm64-v8a/libarp_spoof.so` (and other ABIs you built). If absent, ensure
+  `externalNativeBuild` points at `jni/CMakeLists.txt` and a CMake/NDK build actually ran
+  (Build → Refresh Linked C++ Projects). The app copies it to a writable private dir and
+  `chmod 0755`, so a `noexec` system partition is handled.
 
 - **Cut works but Lag is unstable / hurts other traffic**: Lag is best-effort. Lower the
   `dropRate` in `SpoofController.lag` (e.g. `0.2`) or avoid Lag on busy networks.

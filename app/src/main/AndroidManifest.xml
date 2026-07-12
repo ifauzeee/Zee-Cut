@@ -9,6 +9,7 @@
         android:allowBackup="false"
         android:label="Zee-Cut"
         android:supportsRtl="true"
+        android:extractNativeLibs="true"
         android:theme="@style/Theme.ZeeCut">
 
         <activity
