@@ -1,0 +1,20 @@
+# Built files
+build/
+.cxx/
+*.apk
+*.aar
+*.so
+local.properties
+
+# IDE
+.idea/
+*.iml
+.gradle/
+captures/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.log
