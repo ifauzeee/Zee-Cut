@@ -2,8 +2,6 @@ package com.ifauze.zeecut.net
 
 import com.ifauze.zeecut.model.Device
 import java.net.NetworkInterface
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
 object NetworkScanner {
 
@@ -51,19 +49,13 @@ object NetworkScanner {
 
     fun pingSweep(subnet: Subnet) {
         val base = subnet.ip.substringBeforeLast(".")
-        val ips = (1..254)
-            .map { "$base.$it" }
-            .filter { it != subnet.ip && it != subnet.gateway }
-        val pool = Executors.newFixedThreadPool(32)
-        ips.forEach { ip ->
-            pool.submit { RootShell.run("ping", "-c", "1", "-W", "1", ip) }
-        }
-        pool.shutdown()
-        try {
-            pool.awaitTermination(30, TimeUnit.SECONDS)
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-        }
+        val self = subnet.ip
+        val gw = subnet.gateway
+        val script =
+            "for i in \$(seq 1 254); do h=$base.\$i; " +
+            "if [ \"\$h\" != \"$self\" ] && [ \"\$h\" != \"$gw\" ]; then " +
+            "ping -c1 -W1 \$h >/dev/null 2>&1 & fi; done; wait"
+        RootShell.run(script)
     }
 
     fun resolveHostnames(devices: List<Device>) {

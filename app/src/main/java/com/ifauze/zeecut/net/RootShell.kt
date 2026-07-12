@@ -5,12 +5,12 @@ import java.io.InputStreamReader
 
 object RootShell {
 
+    private const val TIMEOUT_MS = 15000
+
     fun isRootAvailable(): Boolean {
         return try {
-            val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "id"))
-            val out = BufferedReader(InputStreamReader(p.inputStream)).readLine() ?: ""
-            p.waitFor()
-            out.contains("uid=0") || out.contains("0(uid")
+            val out = run("id")
+            out.contains("uid=0")
         } catch (e: Exception) {
             false
         }
@@ -21,9 +21,28 @@ object RootShell {
         return try {
             val p = Runtime.getRuntime().exec(arrayOf("su", "-c", full))
             val sb = StringBuilder()
-            BufferedReader(InputStreamReader(p.inputStream)).forEachLine { sb.appendLine(it) }
-            BufferedReader(InputStreamReader(p.errorStream)).forEachLine { sb.appendLine(it) }
-            p.waitFor()
+            val reader = Thread {
+                try {
+                    BufferedReader(InputStreamReader(p.inputStream)).forEachLine { sb.appendLine(it) }
+                    BufferedReader(InputStreamReader(p.errorStream)).forEachLine { sb.appendLine(it) }
+                } catch (_: Exception) {
+                }
+            }
+            reader.start()
+            val waiter = Thread {
+                try {
+                    p.waitFor()
+                } catch (_: Exception) {
+                }
+            }
+            waiter.start()
+            waiter.join(TIMEOUT_MS.toLong())
+            if (waiter.isAlive) {
+                p.destroyForcibly()
+                waiter.interrupt()
+                sb.appendLine("TIMEOUT")
+            }
+            reader.join(500)
             sb.toString()
         } catch (e: Exception) {
             e.message ?: "exec failed"

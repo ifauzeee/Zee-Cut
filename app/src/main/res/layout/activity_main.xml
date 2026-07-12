@@ -1,75 +1,91 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:orientation="vertical"
-    android:padding="16dp"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:background="@color/dark_bg">
+    android:background="@color/bg">
 
-    <TextView
-        android:id="@+id/tvTitle"
-        android:text="Zee-Cut"
-        android:textSize="24sp"
-        android:textStyle="bold"
-        android:textColor="@color/accent"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content" />
-
-    <TextView
-        android:id="@+id/tvSubtitle"
-        android:text="Network Device Controller (jaringan Anda sendiri)"
-        android:textSize="12sp"
-        android:textColor="#AAAAAA"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content" />
-
-    <Button
-        android:id="@+id/btnScan"
-        android:text="Scan Network"
-        android:layout_marginTop="12dp"
+    <com.google.android.material.appbar.MaterialToolbar
+        android:id="@+id/toolbar"
         android:layout_width="match_parent"
-        android:layout_height="wrap_content" />
+        android:layout_height="?attr/actionBarSize"
+        android:background="@color/bg_dark"
+        app:title="Zee-Cut"
+        app:titleTextColor="@color/brand"
+        app:subtitle="Network Device Controller"
+        app:subtitleTextColor="@color/text_secondary" />
 
     <LinearLayout
-        android:orientation="horizontal"
-        android:gravity="center_vertical"
-        android:layout_marginTop="8dp"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content">
-
-        <TextView
-            android:text="Lag:"
-            android:textColor="#CCCCCC"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content" />
-
-        <SeekBar
-            android:id="@+id/seekLag"
-            android:layout_weight="1"
-            android:layout_marginStart="8dp"
-            android:layout_width="0dp"
-            android:layout_height="wrap_content" />
-
-        <TextView
-            android:id="@+id/tvLagValue"
-            android:text="50%"
-            android:textColor="#FFFFFF"
-            android:layout_marginStart="8dp"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content" />
-    </LinearLayout>
-
-    <ListView
-        android:id="@+id/list"
-        android:layout_marginTop="8dp"
+        android:orientation="vertical"
+        android:padding="16dp"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1" />
+        android:layout_weight="1">
 
-    <TextView
-        android:id="@+id/status"
-        android:text=""
-        android:textColor="#CCCCCC"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content" />
+        <TextView
+            android:id="@+id/status"
+            android:text="Tekan SCAN untuk memindai perangkat di jaringan Anda"
+            android:textColor="@color/text_secondary"
+            android:textSize="13sp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content" />
+
+        <com.google.android.material.progressindicator.LinearProgressIndicator
+            android:id="@+id/progress"
+            android:visibility="gone"
+            android:layout_marginTop="10dp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            app:indicatorColor="@color/brand"
+            app:trackColor="@color/surface" />
+
+        <LinearLayout
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:layout_marginTop="12dp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content">
+
+            <TextView
+                android:text="Lag:"
+                android:textColor="@color/text_secondary"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+
+            <SeekBar
+                android:id="@+id/seekLag"
+                android:layout_weight="1"
+                android:layout_marginStart="10dp"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content" />
+
+            <TextView
+                android:id="@+id/tvLagValue"
+                android:text="50%"
+                android:textColor="@color/text_primary"
+                android:layout_marginStart="10dp"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content" />
+        </LinearLayout>
+
+        <ListView
+            android:id="@+id/list"
+            android:layout_marginTop="10dp"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:divider="@android:color/transparent"
+            android:dividerHeight="10dp"
+            android:scrollbars="none" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btnScan"
+            android:text="SCAN NETWORK"
+            android:layout_marginTop="10dp"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            app:backgroundTint="@color/brand"
+            android:textColor="@color/black" />
+    </LinearLayout>
 </LinearLayout>
