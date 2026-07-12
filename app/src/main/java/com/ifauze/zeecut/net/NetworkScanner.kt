@@ -44,7 +44,7 @@ object NetworkScanner {
 
     fun scan(subnet: Subnet, binaryPath: String): List<Device> {
         val out = RootShell.run(binaryPath, "scan", subnet.iface)
-        return parseScanOutput(out)
+        return parseScanOutput(out).filter { it.ip != subnet.ip }
     }
 
     fun resolveHostnames(devices: List<Device>) {
