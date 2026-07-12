@@ -33,13 +33,16 @@ Target  <---- spoofed ARP ---->  Zee-Cut (phone, rooted)  <---- spoofed ARP ----
 
 Requirements: Android Studio, Android SDK, NDK (side-by-side), a rooted device.
 
-1. Copy `local.properties.example` to `local.properties` and set `sdk.dir` / `ndk.dir`.
-2. Open the project in Android Studio (or build on the command line with Gradle).
-3. Build & install on the rooted device:
+1. Copy `local.properties.example` to `local.properties` and set `sdk.dir` / `ndk.dir`
+   (Android Studio also fills this in automatically).
+2. Open the project in **Android Studio** (File → Open). It will generate the Gradle
+   wrapper and sync. Then Build → Build Bundle(s) / APK(s) → Build APK.
+3. Install on the rooted device:
    ```
-   ./gradlew assembleDebug
    adb install app/build/outputs/apk/debug/app-debug.apk
    ```
+   To build from the command line instead, generate the wrapper first
+   (`gradle wrapper`, requires Gradle installed) then `./gradlew assembleDebug`.
 
 ## Test on device (manual)
 
@@ -70,6 +73,21 @@ adb shell su -c "tcpdump -en -i wlan0 arp"   # or use a packet capture app
 - Raw sockets require a kernel that permits `AF_PACKET` for root (standard on rooted devices).
 - Some devices mount the native lib dir as `noexec`; the app copies the binary to a writable
   private dir and `chmod 0755` to avoid this.
+
+## Troubleshooting
+
+- **App says the binary is missing / `FileNotFound` at `prepareBinary`**: the NDK-built
+  `arp_spoof` executable must be packaged into the APK under `lib/<abi>/`. Verify with:
+  ```
+  unzip -l app/build/outputs/apk/debug/app-debug.apk | grep arp_spoof
+  ```
+  If it is absent, ensure `app/build.gradle.kts` `externalNativeBuild` points at
+  `jni/CMakeLists.txt` and that a CMake/NDK build actually ran (Build → Refresh Linked
+  C++ Projects). On `noexec` system partitions the app already copies the binary to a
+  writable private dir and `chmod 0755`, so that case is handled.
+
+- **Cut works but Lag is unstable / hurts other traffic**: Lag is best-effort. Lower the
+  `dropRate` in `SpoofController.lag` (e.g. `0.2`) or avoid Lag on busy networks.
 
 ## Project layout
 
