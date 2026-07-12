@@ -8,7 +8,9 @@ control their connectivity via ARP spoofing. Inspired by NetCut.
 
 ## Features
 
-- **Scan** — discover devices on your WiFi (reads ARP table after an ARP sweep).
+- **Scan** — discover devices on your WiFi. An ICMP ping sweep (kernel-driven, no raw
+  sockets) populates the ARP table; the native binary then reads `/proc/net/arp`. This
+  works even when SELinux blocks raw `AF_PACKET` sends from the app.
 - **Cut** — fully block a device's internet (ARP MITM, IP forwarding off).
 - **Lag** — throttle a device (best-effort packet drop/delay; experimental).
 - **Restore** — repair ARP tables; all devices are auto-restored when the app closes.

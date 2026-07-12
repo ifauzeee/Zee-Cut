@@ -102,6 +102,7 @@ class MainActivity : AppCompatActivity() {
                 return@execute
             }
             subnet = sub
+            NetworkScanner.pingSweep(sub)
             val found = NetworkScanner.scan(sub, binaryPath)
             NetworkScanner.resolveHostnames(found)
             runOnUiThread {
