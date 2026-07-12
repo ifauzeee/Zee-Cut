@@ -37,13 +37,38 @@ class MainActivity : AppCompatActivity() {
         adapter = DeviceListAdapter(
             this,
             devices,
-            onCut = { d -> withSubnet { s -> spoof.cut(d, s.iface, s.gateway); adapter.notifyDataSetChanged() } },
-            onLag = { d -> withSubnet { s -> spoof.lag(d, s.iface, s.gateway); adapter.notifyDataSetChanged() } },
-            onRestore = { d -> withSubnet { s -> spoof.restore(d, s.iface, s.gateway); adapter.notifyDataSetChanged() } }
+            onCut = { d -> withSubnet { s -> spoof.cut(d, s.iface, s.gateway); afterAction() } },
+            onLag = { d -> withSubnet { s -> spoof.lag(d, s.iface, s.gateway, lagRate()); afterAction() } },
+            onRestore = { d -> withSubnet { s -> spoof.restore(d, s.iface, s.gateway); afterAction() } }
         )
         binding.list.adapter = adapter
 
+        binding.seekLag.max = 90
+        binding.seekLag.progress = 50
+        binding.tvLagValue.text = "50%"
+        binding.seekLag.setOnSeekBarChangeListener(object : android.widget.SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(seek: android.widget.SeekBar?, p: Int, fromUser: Boolean) {
+                binding.tvLagValue.text = "$p%"
+            }
+            override fun onStartTrackingTouch(seek: android.widget.SeekBar?) {}
+            override fun onStopTrackingTouch(seek: android.widget.SeekBar?) {}
+        })
+
         binding.btnScan.setOnClickListener { doScan() }
+    }
+
+    private fun lagRate(): Double = binding.seekLag.progress / 100.0
+
+    private fun afterAction() {
+        adapter.notifyDataSetChanged()
+        updateSummary()
+    }
+
+    private fun updateSummary() {
+        val cut = devices.count { it.status == com.ifauze.zeecut.model.DeviceStatus.CUT }
+        val lag = devices.count { it.status == com.ifauze.zeecut.model.DeviceStatus.LAG }
+        val norm = devices.size - cut - lag
+        binding.status.text = "Normal: $norm   Cut: $cut   Lag: $lag"
     }
 
     private fun withSubnet(action: (NetworkScanner.Subnet) -> Unit) {
@@ -70,17 +95,21 @@ class MainActivity : AppCompatActivity() {
             if (binaryPath.isEmpty()) binaryPath = prepareBinary()
             if (!this::spoof.isInitialized) spoof = SpoofController(binaryPath)
             val sub = NetworkScanner.getWifiSubnet()
-            runOnUiThread {
-                if (sub == null) {
+            if (sub == null) {
+                runOnUiThread {
                     Toast.makeText(this, "Gagal membaca info jaringan WiFi", Toast.LENGTH_SHORT).show()
-                    return@runOnUiThread
                 }
-                subnet = sub
-                val found = NetworkScanner.scan(sub, binaryPath)
+                return@execute
+            }
+            subnet = sub
+            val found = NetworkScanner.scan(sub, binaryPath)
+            NetworkScanner.resolveHostnames(found)
+            runOnUiThread {
                 devices.clear()
                 devices.addAll(found)
                 adapter.notifyDataSetChanged()
                 binding.status.text = "${found.size} perangkat ditemukan (${sub.iface})"
+                updateSummary()
             }
         }
     }

@@ -27,7 +27,8 @@ class DeviceListAdapter(
         val d = items[i]
 
         val info = v.findViewById<TextView>(R.id.tvInfo)
-        info.text = "${d.ip}\n${d.mac}\n${statusLabel(d)}"
+        val host = if (d.hostname.isNotEmpty()) " (${d.hostname})" else ""
+        info.text = "${d.ip}$host\n${d.mac}\n${statusLabel(d)}"
 
         v.findViewById<Button>(R.id.btnCut).setOnClickListener { onCut(d) }
         v.findViewById<Button>(R.id.btnLag).setOnClickListener { onLag(d) }

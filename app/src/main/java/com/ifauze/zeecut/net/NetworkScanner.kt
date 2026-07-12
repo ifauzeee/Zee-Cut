@@ -47,6 +47,28 @@ object NetworkScanner {
         return parseScanOutput(out)
     }
 
+    fun resolveHostnames(devices: List<Device>) {
+        devices.forEach { d ->
+            if (d.hostname.isNotEmpty()) return@forEach
+            val name = resolveHostname(d.ip)
+            if (name.isNotEmpty()) d.hostname = name
+        }
+    }
+
+    private fun resolveHostname(ip: String): String {
+        val holder = arrayOf<String?>(null)
+        val t = Thread {
+            try {
+                holder[0] = java.net.InetAddress.getByName(ip).canonicalHostName
+            } catch (e: Exception) {
+            }
+        }
+        t.start()
+        t.join(800)
+        val name = holder[0]
+        return if (name != null && name != ip) name else ""
+    }
+
     fun parseScanOutput(output: String): List<Device> {
         return output.lines()
             .filter { it.contains(",") }
